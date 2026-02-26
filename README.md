@@ -8,19 +8,19 @@ colcon build --packages-select mie443_contest2 \
 lerobot_description lerobot_controller lerobot_moveit
 ```
 
-2. Launch Gazeo simulation
+2. Launch Gazebo simulation
 ```cpp
 ros2 launch turtlebot4_gz_bringup turtlebot4_gz.launch.py model:=lite
 ```
 
 3. Launch AMCL Localization software
 ```cpp
-ros2 launch turtlebot4_navigation localization.launch.py map:=/opt/ros/jazzy/share/turtlebot4_navigation/maps/warehouse.yaml
+ros2 launch turtlebot4_navigation localization.launch.py map:=/opt/ros/jazzy/share/turtlebot4_navigation/maps/warehouse.yaml use_sim_time:=true
 ```
 
 4. Open RViz2
 ```cpp
-ros2 launch turtlebot4_viz view_navigation.launch.py
+ros2 launch turtlebot4_viz view_navigation.launch.py  use_sim_time:=true
 ```
 
 5. Print AMCL pose estimate
@@ -30,7 +30,7 @@ ros2 topic echo /amcl_pose
 
 6. Start Nav2
 ```cpp
-ros2 launch turtlebot4_navigation nav2.launch.py
+ros2 launch turtlebot4_navigation nav2.launch.py  use_sim_time:=true
 ```
 
 7. Start MoveIt2 & RViz2 (start each command in separate terminals)
