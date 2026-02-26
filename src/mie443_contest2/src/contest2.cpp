@@ -79,6 +79,10 @@ int main(int argc, char** argv) {
 
         /***YOUR CODE HERE***/
 
+        //Keeping track of pose consistently 
+        x=robotPose.x;
+        y=robotPose.y;
+        phi=robotPose.phi;
 
 
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
