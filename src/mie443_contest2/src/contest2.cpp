@@ -61,6 +61,11 @@ int main(int argc, char** argv) {
         RCLCPP_INFO(node->get_logger(), "Box %zu coordinates: x=%.2f, y=%.2f, phi=%.2f",
                     i, boxes.coords[i][0], boxes.coords[i][1], boxes.coords[i][2]);
     }
+
+    // Initialize YOLO object detector
+    YoloInterface yoloDetector(node);
+
+    // Initialize arm controller code BELOW #TODO
     
 
     // Contest countdown timer
@@ -79,6 +84,24 @@ int main(int argc, char** argv) {
 
         /***YOUR CODE HERE***/
 
+
+        /*** TEST CODE FOR YOLO DETECTION ***/
+        static uint64_t lastYoloTime = 0;
+        if (secondsElapsed >= lastYoloTime + 2) {
+            lastYoloTime = secondsElapsed;
+
+            RCLCPP_INFO(node->get_logger(), "--- YOLO Detection (OAK-D Camera) ---");
+            // std::string detected = yoloDetector.getObjectName(CameraSource::OAKD);
+            std::string detected = yoloDetector.getObjectName(CameraSource::WRIST);
+
+            if(!detected.empty()) {
+                float confidence = yoloDetector.getConfidence();
+                RCLCPP_INFO(node->get_logger(), "Detected: %s (Confidence: %.2f)",
+                            detected.c_str(), confidence);
+            } else {
+                RCLCPP_INFO(node->get_logger(), "No object detected");
+            }
+        }
 
 
         std::this_thread::sleep_for(std::chrono::milliseconds(10));

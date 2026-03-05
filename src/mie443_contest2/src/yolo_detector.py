@@ -53,8 +53,46 @@ class YoloDetectorNode(Node):
         boxes = results[0].boxes
 
         ### YOUR CODE HERE ###
-  
 
+        # No object detected because of no bounding boxes
+        if boxes is None or len(boxes) == 0:
+            response.success = False
+            response.class_id = -1
+            response.class_name = ""
+            response.confidence = 0.0
+            response.message = "No objects detected"
+            return response
+
+        # Filter by confidence threshold
+        mask = boxes.conf >= self.confidence_threshold
+        if not mask.any():
+            response.success = False
+            response.class_id = -1
+            response.class_name = ""
+            response.confidence = 0.0
+            response.message = f"No detections above {self.confidence_threshold} confidence"
+            return response
+
+        # Detection successful
+        # Get highest confidence detection
+        best_idx = boxes.conf.argmax()
+        class_id = int(boxes.cls[best_idx])
+        confidence = float(boxes.conf[best_idx])
+        class_name = self.model.names[class_id]
+
+        response.success = True
+        response.class_id = class_id
+        response.class_name = class_name
+        response.confidence = confidence
+        response.message = f"Detected {class_name}"
+
+        if save_detected_image:
+            filename = f"/home/nicolas-rebollo/YOLO Images/{class_name}.jpg"
+            annotated_image = results[0].plot()
+            cv2.imwrite(filename, annotated_image)
+            self.get_logger().info(f"Saved detection image to {filename}")
+
+        self.get_logger().info(f"Detected: {class_name} ({confidence:.2f})")
         return response
 
 

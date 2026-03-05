@@ -31,6 +31,7 @@ def generate_launch_description():
         MoveItConfigsBuilder("so101", package_name="lerobot_moveit")
         .robot_description(file_path=so101_urdf_path)
         .robot_description_semantic(file_path="config/so101.srdf")
+        .planning_pipelines(default_planning_pipeline="ompl")
         .trajectory_execution(file_path="config/moveit_controllers.yaml")
         .to_moveit_configs()
     )
@@ -47,10 +48,6 @@ def generate_launch_description():
             {"publish_robot_description_semantic": True},
         ],
         arguments=["--ros-args", "--log-level", "info"],
-        remappings=[
-            ("/robot_description", "/arm/robot_description"),
-            ("/robot_description_semantic", "/arm/robot_description_semantic"),
-        ],
     )
 
     # RViz

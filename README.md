@@ -56,3 +56,29 @@ source contest2/bin/activate
 ros2 launch lerobot_moveit so101_turtlebot.launch.py
 ros2 launch lerobot_moveit so101_laptop.launch.py
 ```
+
+11. Start image capture server for YOLO
+```cpp
+ros2 run mie443_contest2 image_capture_server
+```
+
+12. Start YOLO detector (must source contest2 venv first)
+```cpp
+source ~/contest2/bin/activate
+ros2 run mie443_contest2 yolo_detector.py
+```
+
+13. Run contest2 code
+```cpp
+ros2 run mie443_contest2 contest2
+```
+
+14. Camera preview
+```cpp
+ros2 run rqt_image_view rqt_image_view
+```
+
+15. Start camera and arm (for YOLO)
+```cpp
+ros2 launch lerobot_moveit so101_turtlebot.launch.py
+```
