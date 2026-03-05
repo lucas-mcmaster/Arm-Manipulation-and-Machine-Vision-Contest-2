@@ -72,6 +72,6 @@ def generate_launch_description():
 
     return LaunchDescription([
         move_group_node,
-        rviz_node,
+        rviz_node
     ])
 

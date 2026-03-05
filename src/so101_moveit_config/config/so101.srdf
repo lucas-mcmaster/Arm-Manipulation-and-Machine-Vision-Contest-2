@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<robot name="so101">
+  <group name="arm">
+    <chain base_link="arm_mount" tip_link="jaw"/>
+  </group>
+  <group_state name="home" group="arm">
+  </group_state>
+</robot>
