@@ -11,6 +11,12 @@
 #include <fstream>
 #include <sstream>
 #include <vector>
+#include <cmath>
+#include <limits>
+#include <nav2_msgs/action/compute_path_to_pose.hpp>
+#include <nav_msgs/msg/path.hpp>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 /*Defining FSM states in a class -- from research this is better than if/else statements as it
 will allow us to adjust the priority and add states more easily if needed*/
@@ -122,6 +128,141 @@ int main(int argc, char** argv) {
     std::vector<YoloDetection> sceneDetections;
     sceneDetections.reserve(5);
 
+    // -----------------------------------------------------------------------
+    // Bido's section – navigable-distance path planning
+    // -----------------------------------------------------------------------
+    // Action client for Nav2's ComputePathToPose — asks the global planner to
+    // plan a path without executing it, so we can measure real path length.
+    using ComputePathToPose = nav2_msgs::action::ComputePathToPose;
+    using GoalHandleComputePath = rclcpp_action::ClientGoalHandle<ComputePathToPose>;
+    auto path_planner_client = rclcpp_action::create_client<ComputePathToPose>(
+        node, "compute_path_to_pose");
+
+    // Helper: ask Nav2 global planner for the path length between two map
+    // poses.  Returns -1.0 on failure (unreachable / server unavailable).
+    auto getNavigablePathLength = [&](double from_x, double from_y,
+                                      double to_x,   double to_y) -> double {
+        // Need planner server running; give it up to 2 s on first call
+        if (!path_planner_client->wait_for_action_server(
+                std::chrono::seconds(2))) {
+            RCLCPP_WARN(node->get_logger(),
+                "compute_path_to_pose server not available; falling back to Euclidean");
+            double dx = to_x - from_x, dy = to_y - from_y;
+            return std::sqrt(dx*dx + dy*dy);
+        }
+
+        // Build goal: use explicit start pose so we don't need the robot to
+        // be at from_x/from_y right now.
+        auto goal = ComputePathToPose::Goal();
+        goal.use_start = true;
+
+        goal.start.header.frame_id = "map";
+        goal.start.header.stamp    = node->now();
+        goal.start.pose.position.x = from_x;
+        goal.start.pose.position.y = from_y;
+        goal.start.pose.orientation.w = 1.0;  // heading doesn't affect length
+
+        goal.goal.header.frame_id  = "map";
+        goal.goal.header.stamp     = node->now();
+        goal.goal.pose.position.x  = to_x;
+        goal.goal.pose.position.y  = to_y;
+        goal.goal.pose.orientation.w = 1.0;
+
+        goal.planner_id = "";  // use default planner (GridBased / NavFn)
+
+        // Send goal and wait (blocking, planning-only — no motion)
+        auto goal_handle_future = path_planner_client->async_send_goal(goal);
+        if (rclcpp::spin_until_future_complete(node, goal_handle_future,
+                std::chrono::seconds(5)) != rclcpp::FutureReturnCode::SUCCESS) {
+            RCLCPP_WARN(node->get_logger(),
+                "compute_path_to_pose: send_goal timed out");
+            double dx = to_x - from_x, dy = to_y - from_y;
+            return std::sqrt(dx*dx + dy*dy);
+        }
+
+        auto goal_handle = goal_handle_future.get();
+        if (!goal_handle) {
+            RCLCPP_WARN(node->get_logger(),
+                "compute_path_to_pose: goal rejected");
+            double dx = to_x - from_x, dy = to_y - from_y;
+            return std::sqrt(dx*dx + dy*dy);
+        }
+
+        auto result_future = path_planner_client->async_get_result(goal_handle);
+        if (rclcpp::spin_until_future_complete(node, result_future,
+                std::chrono::seconds(10)) != rclcpp::FutureReturnCode::SUCCESS) {
+            RCLCPP_WARN(node->get_logger(),
+                "compute_path_to_pose: result timed out");
+            double dx = to_x - from_x, dy = to_y - from_y;
+            return std::sqrt(dx*dx + dy*dy);
+        }
+
+        auto result = result_future.get();
+        if (result.code != rclcpp_action::ResultCode::SUCCEEDED) {
+            RCLCPP_WARN(node->get_logger(),
+                "compute_path_to_pose: planning failed (unreachable?)");
+            return -1.0;
+        }
+
+        // Sum arc length of the returned path
+        const auto& poses = result.result->path.poses;
+        double length = 0.0;
+        for (size_t i = 1; i < poses.size(); ++i) {
+            double dx = poses[i].pose.position.x - poses[i-1].pose.position.x;
+            double dy = poses[i].pose.position.y - poses[i-1].pose.position.y;
+            length += std::sqrt(dx*dx + dy*dy);
+        }
+        RCLCPP_DEBUG(node->get_logger(),
+            "Navigable length (%.2f,%.2f)->(%.2f,%.2f) = %.3f m",
+            from_x, from_y, to_x, to_y, length);
+        return length;
+    };
+
+    // Greedy nearest-navigable-neighbour ordering.
+    // Called once from INIT with the real AMCL starting pose.
+    // visitOrder[i] = index into boxes.coords for the i-th stop.
+    std::vector<int> visitOrder;
+    auto buildVisitOrder = [&](double start_x, double start_y) {
+        int n = static_cast<int>(boxes.coords.size());
+        std::vector<bool> visited(n, false);
+        visitOrder.clear();
+        visitOrder.reserve(n);
+
+        double cx = start_x, cy = start_y;
+
+        for (int step = 0; step < n; ++step) {
+            int    best     = -1;
+            double bestCost = std::numeric_limits<double>::max();
+
+            for (int j = 0; j < n; ++j) {
+                if (visited[j]) continue;
+                double cost = getNavigablePathLength(
+                    cx, cy,
+                    boxes.coords[j][0], boxes.coords[j][1]);
+
+                // -1 means unreachable; treat as worst case
+                if (cost < 0.0) cost = std::numeric_limits<double>::max();
+
+                if (cost < bestCost) { bestCost = cost; best = j; }
+            }
+
+            visited[best] = true;
+            visitOrder.push_back(best);
+            cx = boxes.coords[best][0];
+            cy = boxes.coords[best][1];
+
+            RCLCPP_INFO(node->get_logger(),
+                "[PathPlan] step %d -> box %d  (x=%.2f, y=%.2f, phi=%.2f)  "
+                "navigable dist=%.2f m",
+                step, best,
+                boxes.coords[best][0],
+                boxes.coords[best][1],
+                boxes.coords[best][2],
+                bestCost);
+        }
+    };
+    // -----------------------------------------------------------------------
+
     // YOLO cooldown (1s)
     auto lastYoloTime = std::chrono::steady_clock::time_point::min();
 
@@ -167,14 +308,29 @@ int main(int argc, char** argv) {
 
         switch(currentState) //using switch function for FSM. Similar to If/Else but better practice and easier to change according to google
         {
-            case RobotState::INIT: //case is pretty much the "if". Here it implies if currentState==INIT
+            case RobotState::INIT:
                 initial_x=x;
                 initial_y=y;
                 initial_phi=phi;
-                //outputting initial pose
-                RCLCPP_INFO(node->get_logger(), "Start pose saved. x=%.2f, y=%.2f, phi=%.2f. Transitioning to Object Pickup", initial_x, initial_y, initial_phi);
-                currentState=RobotState::PICKUP_OBJECT; //this transitions FSM to next state to pick up the object off the robot
-                break; //uses break to ensure you do not just go to the next case
+                RCLCPP_INFO(node->get_logger(),
+                    "Start pose saved. x=%.2f, y=%.2f, phi=%.2f. "
+                    "Building navigable visit order...",
+                    initial_x, initial_y, initial_phi);
+
+                // ---------------------------------------------------------------
+                // Bido's section – build visit order using real navigable distances
+                // from the Nav2 global planner (obstacle-aware path lengths).
+                // ---------------------------------------------------------------
+                buildVisitOrder(
+                    static_cast<double>(initial_x),
+                    static_cast<double>(initial_y));
+                // ---------------------------------------------------------------
+
+                RCLCPP_INFO(node->get_logger(),
+                    "Visit order ready (%zu boxes). Transitioning to PICKUP_OBJECT.",
+                    visitOrder.size());
+                currentState=RobotState::PICKUP_OBJECT;
+                break;
             
             case RobotState::PICKUP_OBJECT: //code to pick up object right away so it does not fall when moving
                 // Nick + Ahmed's section
@@ -216,27 +372,51 @@ int main(int argc, char** argv) {
                 }
             
             case RobotState::NAVIGATE_SCENE:
-                //Bido's section
-                //probably best to define some functions outside here then call them tbh. Just so this doesn't get too bloated
-                
-                if(boxCounter<boxes.coords.size()) //if statement to make sure we check all boxes
+                // ---------------------------------------------------------------
+                // Bido's section – navigate to next scene object using the
+                // pre-computed nearest-neighbour visit order.
+                // ---------------------------------------------------------------
+                if (boxCounter < static_cast<int>(visitOrder.size()))
                 {
-                    //add navigation code here. Gemini TODO: nav.moveToGoal(boxes.coords[current_box_index][0], ...)
+                    // Retrieve optimised destination from visitOrder
+                    int targetIdx = visitOrder[boxCounter];
+                    double goal_x   = boxes.coords[targetIdx][0];
+                    double goal_y   = boxes.coords[targetIdx][1];
+                    double goal_phi = boxes.coords[targetIdx][2];
 
-                    //once navigation to box is done switch state to detecting object (YOLO)
-                    //if(navIsDone)
-                    RCLCPP_INFO(node->get_logger(), "Box successfully reached! Transitioning to YOLO detection");
-                    currentState=RobotState::DETECT_SCENE_OBJECT;
-                    break;
-                }
-                else //if we have hit every box then we return to start. Switching state to return to start
-                {
-                    if(!objectPlaced)//if statement just to let us know in terminal if object was successfully placed
-                    {
-                        RCLCPP_WARN(node->get_logger(), "Checked all boxes but didn't place object.");
+                    RCLCPP_INFO(node->get_logger(),
+                        "[NAVIGATE_SCENE] Moving to box %d (visit %d/%zu)  "
+                        "x=%.2f, y=%.2f, phi=%.2f",
+                        targetIdx, boxCounter + 1, visitOrder.size(),
+                        goal_x, goal_y, goal_phi);
+
+                    // nav.moveToGoal() blocks until Nav2 reports success/failure.
+                    bool navSuccess = nav.moveToGoal(goal_x, goal_y, goal_phi);
+
+                    if (navSuccess) {
+                        RCLCPP_INFO(node->get_logger(),
+                            "[NAVIGATE_SCENE] Box %d reached successfully.", targetIdx);
+                        currentState = RobotState::DETECT_SCENE_OBJECT;
+                    } else {
+                        // Navigation failed (obstacle, timeout, etc.).
+                        // Log and skip this box to avoid getting stuck, then
+                        // increment the counter so we try the next location.
+                        RCLCPP_WARN(node->get_logger(),
+                            "[NAVIGATE_SCENE] Failed to reach box %d. Skipping.", targetIdx);
+                        boxCounter++;
+                        // Stay in NAVIGATE_SCENE to attempt next box on next loop.
                     }
-                    currentState=RobotState::RETURN_HOME
                 }
+                else
+                {
+                    // All boxes visited
+                    if (!objectPlaced) {
+                        RCLCPP_WARN(node->get_logger(),
+                            "[NAVIGATE_SCENE] Checked all boxes but didn't place object.");
+                    }
+                    currentState = RobotState::RETURN_HOME;
+                }
+                // ---------------------------------------------------------------
                 break;
 
             case RobotState::DETECT_SCENE_OBJECT:
@@ -266,14 +446,14 @@ int main(int argc, char** argv) {
             
             case RobotState::CHECK_MATCH:
                 //Nick's section also - check if object matches what we need 
-                //template I used but feel free to change below
                 if(yoloObjectName==targetObject) //if there is a match go to placing object state
                 {
                     RCLCPP_INFO(node->get_logger(), "Object Matches!");
                     currentState=RobotState::PLACE_IN_BIN;
-                    boxCounter++; //incrementing the boxCounter to get ready to move on after object placement
+                    // NOTE: boxCounter is incremented AFTER placement succeeds
+                    // (see PLACE_IN_BIN), so we do NOT increment it here.
                 }
-                else //otherwise we continue onwards to the next bin immediately
+                else //otherwise move on to the next bin
                 {
                     boxCounter++;
                     currentState=RobotState::NAVIGATE_SCENE;
@@ -288,6 +468,7 @@ int main(int argc, char** argv) {
                 //objectPlaced=true;
                 if (objectPlaced)//once its in the bin we continue to next box
                 {
+                    boxCounter++; // Bido: increment here, after successful placement
                     currentState=RobotState::NAVIGATE_SCENE;
                     break;
                 }
@@ -298,12 +479,30 @@ int main(int argc, char** argv) {
                 }
             
             case RobotState::RETURN_HOME:
-                //Bido's section also
-                RCLCPP_INFO(node->get_logger(), "Returning to start coordinates");
-                //gemini recommended: TODO: nav.moveToGoal(start_x, start_y, start_phi)
+                // ---------------------------------------------------------------
+                // Bido's section – navigate back to the recorded starting pose.
+                // ---------------------------------------------------------------
+                RCLCPP_INFO(node->get_logger(),
+                    "[RETURN_HOME] Navigating back to start: x=%.2f, y=%.2f, phi=%.2f",
+                    initial_x, initial_y, initial_phi);
 
+                {
+                    bool homeSuccess = nav.moveToGoal(
+                        static_cast<double>(initial_x),
+                        static_cast<double>(initial_y),
+                        static_cast<double>(initial_phi));
 
-                currentState = RobotState::WRITE_OUTPUTS; //last state to save all the data to txt file. We could do this as we go instead
+                    if (homeSuccess) {
+                        RCLCPP_INFO(node->get_logger(),
+                            "[RETURN_HOME] Successfully returned to start position.");
+                    } else {
+                        RCLCPP_WARN(node->get_logger(),
+                            "[RETURN_HOME] Could not reach start exactly – proceeding to output.");
+                    }
+                }
+                // ---------------------------------------------------------------
+
+                currentState = RobotState::WRITE_OUTPUTS;
                 break;
 
             case RobotState::WRITE_OUTPUTS: //state to save txt file. Might move this cause if we don't finish it won't write the data
