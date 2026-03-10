@@ -229,18 +229,18 @@ int main(int argc, char** argv) {
                 currentState = RobotState::WRITE_OUTPUTS; //last state to save all the data to txt file. We could do this as we go instead
                 break;
 
-            case RobotState::WRITE_OUTPUTS:
+            case RobotState::WRITE_OUTPUTS: //state to save txt file. Might move this cause if we don't finish it won't write the data
                 RCLCPP_INFO(node->get_logger(), "Writing output files...");
                 // TODO: Write txt file with manipulable object info and all scene objects + locations
                 current_state = RobotState::DONE;
                 break;
 
-            case RobotState::DONE:
+            case RobotState::DONE: //done state once we have completed contest in case there is still time remaining
                 // Idle state, do nothing until timer runs out
                 break;
             
             default:
-                RCLCPP_ERROR(node->get_logger(), "CRITICAL ERROR: FSM entered an unknown state! Safely idling.");
+                RCLCPP_ERROR(node->get_logger(), "CRITICAL ERROR: FSM entered unknown state. Switching to Idle State.");
                 currentState = RobotState::DONE; // Force into a safe, idle state
                 break;
         }
