@@ -21,7 +21,7 @@ class YoloDetectorNode(Node):
         self.get_logger().info('YOLO model loaded')
         
         # Confidence threshold
-        self.confidence_threshold = 0.5
+        self.confidence_threshold = 0.6
         
         # Create service
         self.service = self.create_service(
@@ -86,6 +86,7 @@ class YoloDetectorNode(Node):
         response.confidence = confidence
         response.message = f"Detected {class_name}"
 
+        # Save image of detected object
         if save_detected_image:
             filename = f"/home/nicolas-rebollo/YOLO Images/{class_name}.jpg"
             annotated_image = results[0].plot()
