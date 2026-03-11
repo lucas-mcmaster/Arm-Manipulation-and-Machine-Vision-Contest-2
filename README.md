@@ -1,5 +1,60 @@
 # MIE443 - Contest2
 
+## Proper Command Order for Contest 2 (8 terminals required)
+
+1. Launch AMCL (on laptop terminal)
+```cpp
+ros2 launch turtlebot4_navigation localization.launch.py mmap:=/home/nicolas-rebollo/ros2_ws/src/mie443_contest2/maps/Contest2MapPractice.yaml use_sim_time:=true
+```
+
+2. Initialize NAV2 (on laptop terminal)
+```cpp
+ros2 launch turtlebot4_navigation nav2.launch.py use_sim_time:=true
+```
+
+3. Start up RVIZ for nav2 (on laptop terminal)
+```cpp
+ros2 launch turtlebot4_viz view_navigation.launch.py use_sim_time:=true
+```
+
+4. Start MoveIt2 on Turtlebot (SSH)
+```cpp
+ssh ubuntu@100.69.127.75
+```
+```cpp
+source contest2/bin/activate
+```
+```cpp
+ros2 launch lerobot_moveit so101_turtlebot.launch.py
+```
+
+5. Start MoveIt2 on Laptop (on laptop terminal)
+```cpp
+ros2 launch lerobot_moveit so101_laptop.launch.py
+```
+
+6. Start Image Capture Server (SSH)
+```cpp
+ssh ubuntu@100.69.127.75
+```
+```cpp
+ros2 run mie443_contest2 yolo_detector.py
+```
+
+7. Launch YOLO Detector (on laptop terminal)
+```cpp
+source ~/contest2/bin/activate
+```
+```cpp
+ros2 run mie443_contest2 yolo_detector.py
+```
+
+8. Launch Contest 2 Code (on laptop terminal)
+```cpp
+ros2 run mie443_contest2 contest2
+```
+
+
 ## Useful Commands
 
 1. Colcon build required packages

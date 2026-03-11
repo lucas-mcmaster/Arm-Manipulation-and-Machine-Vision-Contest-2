@@ -26,8 +26,8 @@ private:
 
     // Latest detection results
     std::string latest_class_name_;
-    float latest_confidence_;
     bool has_detection_;
+    float latest_confidence_;
 
 public:
     YoloInterface(std::shared_ptr<rclcpp::Node> node);

@@ -269,7 +269,7 @@ int main(int argc, char** argv) {
     auto runYoloDetection = [&](CameraSource camera, bool save_image) -> YoloDetection {
         auto now = std::chrono::steady_clock::now();
         if (now - lastYoloTime < std::chrono::seconds(1)) {
-            RCLCPP_INFO(node->get_logger(), "YOLO: cooldown active, skipping detection");
+            // RCLCPP_INFO(node->get_logger(), "YOLO: cooldown active, skipping detection");
             return {"", -1.0f, x, y, phi, false};
         }
         lastYoloTime = now;
@@ -326,9 +326,9 @@ int main(int argc, char** argv) {
                 // ---------------------------------------------------------------
 
                 RCLCPP_INFO(node->get_logger(),
-                    "Visit order ready (%zu boxes). Transitioning to PICKUP_OBJECT.",
+                    "Visit order ready (%zu boxes). Transitioning to NAVIGATE_SCENE (pickup bypassed).",
                     visitOrder.size());
-                currentState=RobotState::PICKUP_OBJECT;
+                currentState=RobotState::NAVIGATE_SCENE;
                 break;
             
             case RobotState::PICKUP_OBJECT: { //code to pick up object right away so it does not fall when moving
@@ -337,7 +337,7 @@ int main(int argc, char** argv) {
                 // NOTE: may want fallback here for if pickup fails. Set targetObject to some default and retry to
                 // pickup object a certain amount of times maybe
 
-                RCLCPP_INFO(node->get_logger(), "Detecting and picking up object.");
+                // RCLCPP_INFO(node->get_logger(), "Detecting and picking up object.");
                 // TODO: (Nick) Call yolo.getObjectName(CameraSource::WRIST, true) and store yolo object name
                 YoloDetection det = runYoloDetection(CameraSource::WRIST, true); // save image of manipulable object
                 if (!det.valid) {
