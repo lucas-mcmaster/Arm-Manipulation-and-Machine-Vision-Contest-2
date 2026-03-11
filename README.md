@@ -4,7 +4,7 @@
 
 1. Launch AMCL (on laptop terminal)
 ```cpp
-ros2 launch turtlebot4_navigation localization.launch.py mmap:=/home/nicolas-rebollo/ros2_ws/src/mie443_contest2/maps/Contest2MapPractice.yaml use_sim_time:=true
+ros2 launch turtlebot4_navigation localization.launch.py map:=/home/nicolas-rebollo/ros2_ws/src/mie443_contest2/maps/Contest2MapPractice.yaml use_sim_time:=true
 ```
 
 2. Initialize NAV2 (on laptop terminal)
