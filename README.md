@@ -38,7 +38,7 @@ ros2 launch lerobot_moveit so101_laptop.launch.py
 ssh ubuntu@100.69.127.75
 ```
 ```cpp
-ros2 run mie443_contest2 yolo_detector.py
+ros2 run mie443_contest2 image_capture_server
 ```
 
 7. Launch YOLO Detector (on laptop terminal)
