@@ -15,9 +15,12 @@ class ImageCaptureServer : public rclcpp::Node {
 public:
     ImageCaptureServer() : Node("image_capture_server") {
         // Subscribe to camera feed to maintain latest image
+        rclcpp::QoS image_qos(rclcpp::KeepLast(10));
+        image_qos.transient_local();
+        image_qos.reliable();
         image_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
             "/oakd/rgb/preview/image_raw",
-            10,
+            image_qos,
             std::bind(&ImageCaptureServer::imageCallback, this, std::placeholders::_1)
         );
 

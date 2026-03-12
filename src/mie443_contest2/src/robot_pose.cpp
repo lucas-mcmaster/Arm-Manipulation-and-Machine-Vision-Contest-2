@@ -9,7 +9,6 @@ RobotPose::RobotPose(double x, double y, double phi) {
 }
 
 void RobotPose::poseCallback(const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg) {
-	// Extract yaw from quaternion using tf2
 	phi = tf2::getYaw(msg->pose.pose.orientation);
 	x = msg->pose.pose.position.x;
 	y = msg->pose.pose.position.y;

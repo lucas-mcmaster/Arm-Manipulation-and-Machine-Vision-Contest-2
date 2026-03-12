@@ -65,9 +65,15 @@ int main(int argc, char** argv) {
 
     // Robot pose object + subscriber
     RobotPose robotPose(0, 0, 0);
+    
+    // Force transient_local durability (as requested).
+    rclcpp::QoS amcl_qos(rclcpp::KeepLast(10));
+    amcl_qos.reliable();
+    amcl_qos.transient_local();
+    
     auto amclSub = node->create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
         "/amcl_pose",
-        10,
+        amcl_qos,
         std::bind(&RobotPose::poseCallback, &robotPose, std::placeholders::_1)
     );
 
@@ -114,6 +120,16 @@ int main(int argc, char** argv) {
     float manipulableObjectConfidence=-1.0f; // manipulable object confidence identified from yolo
     bool manipulableObjectLatched=false; // latch first valid pickup detection to avoid overwriting
     int sceneDetectAttempts=0; // retry counter for scene object detection
+
+    // ── Manipulable object coordinates in the arm base frame ─────────────────
+    // UPDATE BEFORE RUNNING.
+    const double OBJ_ARM_X = 0.15;   // metres forward from arm base
+    const double OBJ_ARM_Y = 0.00;   // metres lateral
+    const double OBJ_ARM_Z = 0.05;   // metres height (top plate surface)
+
+    // Retry counter for arm pick attempts
+    int pickAttempts = 0;
+    const int MAX_PICK_ATTEMPTS = 3;
     auto sceneDetectStart = std::chrono::steady_clock::time_point::min();
     auto lastSceneDetectAttempt = std::chrono::steady_clock::time_point::min();
 
@@ -325,34 +341,34 @@ int main(int argc, char** argv) {
         
         /***YOUR CODE HERE***/
         //Keeping track of pose consistently 
-        x=robotPose.x;
-        y=robotPose.y;
-        phi=robotPose.phi;
+        
+
+        while (x == 0.0 && y == 0.0 && phi == 0.0) {
+            x=robotPose.x;
+            y=robotPose.y;
+            phi=robotPose.phi;
+            RCLCPP_INFO_THROTTLE(node->get_logger(),
+                        *node->get_clock(), 2000,   // log every 2s to avoid spam
+                        "INIT: Waiting for valid AMCL pose...");       
+        }
 
         switch(currentState) //using switch function for FSM. Similar to If/Else but better practice and easier to change according to google
         {
             case RobotState::INIT:
-                initial_x=x;
-                initial_y=y;
-                initial_phi=phi;
+
+                initial_x   = x;
+                initial_y   = y;
+                initial_phi = phi;
                 RCLCPP_INFO(node->get_logger(),
                     "Start pose saved. x=%.2f, y=%.2f, phi=%.2f. "
                     "Building navigable visit order...",
                     initial_x, initial_y, initial_phi);
 
-                // ---------------------------------------------------------------
-                // Bido's section – build visit order using real navigable distances
-                // from the Nav2 global planner (obstacle-aware path lengths).
-                // ---------------------------------------------------------------
                 buildVisitOrder(
                     static_cast<double>(initial_x),
                     static_cast<double>(initial_y));
-                // ---------------------------------------------------------------
 
-                RCLCPP_INFO(node->get_logger(),
-                    "Visit order ready (%zu boxes). Transitioning to NAVIGATE_SCENE (pickup bypassed).",
-                    visitOrder.size());
-                currentState=RobotState::NAVIGATE_SCENE;
+                currentState = RobotState::PICKUP_OBJECT;
                 break;
             
             case RobotState::PICKUP_OBJECT: { //code to pick up object right away so it does not fall when moving
@@ -379,8 +395,65 @@ int main(int argc, char** argv) {
                     targetObject = manipulableObjectName;
                 }
 
-                // TODO: (Ahmed) Call arm.moveToCartesianPose(...) and arm.moveGripper(...) to pick it up
+                // Ahmed's section — full arm pick sequence
+                {
+                    bool pickSuccess = false;
 
+                    // Step 1: Open gripper before approaching
+                    if (!arm.openGripper()) {
+                        RCLCPP_ERROR(node->get_logger(), "PICKUP: Failed to open gripper");
+                    }
+                    // Step 2: Pre-grasp hover — 8 cm above object, gripper pointing straight down (pitch = PI/2)
+                    else if (!arm.moveToCartesianPose(
+                        OBJ_ARM_X, OBJ_ARM_Y, OBJ_ARM_Z + 0.08,
+                        0.0, M_PI / 2.0, 0.0))
+                    {
+                        RCLCPP_ERROR(node->get_logger(), "PICKUP: Pre-grasp hover unreachable");
+                    }
+                    // Step 3: Descend straight down to object
+                    else if (!arm.moveToCartesianPose(
+                        OBJ_ARM_X, OBJ_ARM_Y, OBJ_ARM_Z,
+                        0.0, M_PI / 2.0, 0.0))
+                    {
+                        RCLCPP_ERROR(node->get_logger(), "PICKUP: Grasp pose unreachable");
+                    }
+                    // Step 4: Close gripper to grip the object
+                    else if (!arm.closeGripper()) {
+                        RCLCPP_ERROR(node->get_logger(), "PICKUP: Failed to close gripper");
+                    }
+                    else {
+                        // Step 5: Brief pause to confirm grip is stable
+                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+                        // Step 6: Lift to safe carry height (15 cm above object)
+                        if (!arm.moveToCartesianPose(
+                            OBJ_ARM_X, OBJ_ARM_Y, OBJ_ARM_Z + 0.15,
+                            0.0, M_PI / 2.0, 0.0))
+                        {
+                            RCLCPP_WARN(node->get_logger(),
+                                "PICKUP: Lift step failed — object may still be gripped, continuing");
+                        }
+                        pickSuccess = true;
+                        pickAttempts = 0; // reset counter on success
+                    }
+
+                    if (pickSuccess) {
+                        objectInArm = true;
+                        RCLCPP_INFO(node->get_logger(), "PICKUP: Object successfully picked up!");
+                    } else {
+                        pickAttempts++;
+                        RCLCPP_WARN(node->get_logger(),
+                            "PICKUP: Attempt %d/%d failed.", pickAttempts, MAX_PICK_ATTEMPTS);
+                        if (pickAttempts >= MAX_PICK_ATTEMPTS) {
+                            RCLCPP_ERROR(node->get_logger(),
+                                "PICKUP: Max attempts reached — skipping pickup, continuing without object.");
+                            pickAttempts = 0;
+                            objectInArm = false;
+                            currentState = RobotState::NAVIGATE_SCENE;
+                        }
+                        break; // retry next loop
+                    }
+                }
 
                 //*****once the object is picked up set objectInArm=true;
                 if(objectInArm) //moving on to the next state if object is in the arm
@@ -406,7 +479,10 @@ int main(int argc, char** argv) {
                     int targetIdx = visitOrder[boxCounter];
                     double goal_x   = boxes.coords[targetIdx][0];
                     double goal_y   = boxes.coords[targetIdx][1];
-                    double goal_phi = boxes.coords[targetIdx][2];
+                    double goal_phi = boxes.coords[targetIdx][2] + M_PI;
+
+                    // Normalize goal_phi
+                    if (goal_phi > M_PI) goal_phi -= 2*M_PI;
 
                     RCLCPP_INFO(node->get_logger(),
                         "[NAVIGATE_SCENE] Moving to box %d (visit %d/%zu)  "
@@ -511,8 +587,88 @@ int main(int argc, char** argv) {
             case RobotState::PLACE_IN_BIN: //this section to localize bin with AprilTag and then place object
                 //Ahmed's section as well
                 RCLCPP_INFO(node->get_logger(), "Placing object in bin");
-                //Add AprilTAG detection code and arm movement code to drop item
-                //once this is done set the below comment to true
+
+                // Ahmed's section — AprilTag localisation + arm place sequence
+                {
+                    // The tag ID matches the original box index from coords.xml.
+                    // boxCounter has NOT been incremented yet (that happens after success),
+                    // so visitOrder[boxCounter] gives the correct current box index.
+                    int tag_id = visitOrder[boxCounter];
+
+                    RCLCPP_INFO(node->get_logger(),
+                        "PLACE: Looking for AprilTag ID %d ...", tag_id);
+
+                    // Step 1: Check AprilTag is visible (timeout 2 s)
+                    std::vector<int> visible = tag_detector.getVisibleTags({tag_id}, 2000);
+                    if (visible.empty()) {
+                        RCLCPP_WARN(node->get_logger(),
+                            "PLACE: AprilTag %d not visible yet — retrying next loop", tag_id);
+                        break; // stay in PLACE_IN_BIN, try again
+                    }
+
+                    // Step 2: Get bin pose from AprilTag (in base_link frame)
+                    auto bin_pose_opt = tag_detector.getTagPose(tag_id, 2000);
+                    if (!bin_pose_opt.has_value()) {
+                        RCLCPP_WARN(node->get_logger(),
+                            "PLACE: Could not get pose for tag %d — retrying", tag_id);
+                        break;
+                    }
+                    geometry_msgs::msg::Pose bin_pose = bin_pose_opt.value();
+
+                    RCLCPP_INFO(node->get_logger(),
+                        "PLACE: Bin localised — camera frame (%.3f, %.3f, %.3f)",
+                        bin_pose.position.x,
+                        bin_pose.position.y,
+                        bin_pose.position.z);
+
+                    // Step 3: Convert AprilTag pose (camera/base_link frame) → arm base frame.
+                    //   Camera Z (depth forward) maps to arm X (reach forward).
+                    //   Camera X (lateral)       maps to arm -Y.
+                    //   Bin top rim is ~5 cm above the tag centre height.
+                    double bin_arm_x = bin_pose.position.z - 0.05;  // depth → arm forward, back off tag face
+                    double bin_arm_y = -bin_pose.position.x;         // lateral flip
+                    double bin_arm_z =  bin_pose.position.y + 0.05;  // bin top rim height
+
+                    bool placeSuccess = false;
+
+                    // Step 4: Pre-place hover — 10 cm above bin opening, gripper pointing down
+                    if (!arm.moveToCartesianPose(
+                        bin_arm_x, bin_arm_y, bin_arm_z + 0.10,
+                        0.0, M_PI / 2.0, 0.0))
+                    {
+                        RCLCPP_ERROR(node->get_logger(), "PLACE: Pre-place hover unreachable — retrying");
+                    }
+                    // Step 5: Lower object into bin
+                    else if (!arm.moveToCartesianPose(
+                        bin_arm_x, bin_arm_y, bin_arm_z,
+                        0.0, M_PI / 2.0, 0.0))
+                    {
+                        RCLCPP_ERROR(node->get_logger(), "PLACE: Could not lower into bin — retrying");
+                    }
+                    // Step 6: Open gripper to release object
+                    else if (!arm.openGripper()) {
+                        RCLCPP_ERROR(node->get_logger(), "PLACE: Gripper release failed — retrying");
+                    }
+                    else {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+
+                        // Step 7: Retract arm up and clear of bin
+                        arm.moveToCartesianPose(
+                            bin_arm_x, bin_arm_y, bin_arm_z + 0.15,
+                            0.0, M_PI / 2.0, 0.0);
+
+                        placeSuccess = true;
+                    }
+
+                    if (placeSuccess) {
+                        objectPlaced = true;
+                        objectInArm  = false;
+                        RCLCPP_INFO(node->get_logger(), "PLACE: Object successfully placed in bin!");
+                    } else {
+                        break; // retry from top of PLACE_IN_BIN next loop
+                    }
+                }
+
                 //objectPlaced=true;
                 if (objectPlaced)//once its in the bin we continue to next box
                 {
