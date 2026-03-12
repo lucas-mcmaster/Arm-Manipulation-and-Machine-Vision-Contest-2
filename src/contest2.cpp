@@ -11,6 +11,12 @@
 #include <fstream>
 #include <sstream>
 #include <vector>
+#include <cmath>
+#include <limits>
+#include <nav2_msgs/action/compute_path_to_pose.hpp>
+#include <nav_msgs/msg/path.hpp>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 /*Defining FSM states in a class -- from research this is better than if/else statements as it
 will allow us to adjust the priority and add states more easily if needed*/
@@ -90,14 +96,7 @@ int main(int argc, char** argv) {
     Navigation nav(node); //these names can be changes as you'd like
     YoloInterface yolo(node);
     ArmController arm(node);
-    AprilTagDetector tag_detector(node, "base_link"); // use base_link so AprilTag pose is in robot frame
-
-    // ── Manipulable object coordinates in arm base frame ──────────────────────
-    // These values are provided by the TAs on contest day.
-    // Update them here (or load from a param/XML) before running.
-    const double OBJ_ARM_X = 0.15;   // metres — forward from arm base
-    const double OBJ_ARM_Y = 0.00;   // metres — lateral
-    const double OBJ_ARM_Z = 0.05;   // metres — height above arm base (top plate surface)
+    AprilTagDetector tag_detector(node);
 
     //FSM initialization
     RobotState currentState = RobotState::INIT;
@@ -114,21 +113,19 @@ int main(int argc, char** argv) {
     std::string manipulableObjectName=""; // manipulable object (on top of turtlebot) identified from yolo
     float manipulableObjectConfidence=-1.0f; // manipulable object confidence identified from yolo
     bool manipulableObjectLatched=false; // latch first valid pickup detection to avoid overwriting
+    int sceneDetectAttempts=0; // retry counter for scene object detection
 
-    // Index of the scene object that matched the manipulable object (set in CHECK_MATCH)
-    int matchedBoxIndex = -1;
+    // ── Manipulable object coordinates in the arm base frame ─────────────────
+    // UPDATE BEFORE RUNNING.
+    const double OBJ_ARM_X = 0.15;   // metres forward from arm base
+    const double OBJ_ARM_Y = 0.00;   // metres lateral
+    const double OBJ_ARM_Z = 0.05;   // metres height (top plate surface)
 
-    // ── Manipulable object coordinates in arm_mount (base) frame ──────────────
-    // *** REPLACE THESE with the values provided by the TAs on contest day ***
-    const double MANIP_OBJ_X = 0.15;   // metres — forward from arm mount
-    const double MANIP_OBJ_Y = 0.00;   // metres — lateral offset
-    const double MANIP_OBJ_Z = 0.05;   // metres — height (top-plate level)
-
-    // ── Fixed offset: robot base_link → arm_mount (from URDF) ────────────────
-    // Used to convert AprilTag world-frame pose → arm base frame.
-    // *** Verify against so101.urdf ***
-    const double ARM_MOUNT_FORWARD = 0.10;  // metres forward of base centre
-    const double ARM_MOUNT_UP      = 0.30;  // metres above ground
+    // Retry counter for arm pick attempts
+    int pickAttempts = 0;
+    const int MAX_PICK_ATTEMPTS = 3;
+    auto sceneDetectStart = std::chrono::steady_clock::time_point::min();
+    auto lastSceneDetectAttempt = std::chrono::steady_clock::time_point::min();
 
     // Struct for returned values from YOLO detection in helper below
     struct YoloDetection {
@@ -144,6 +141,161 @@ int main(int argc, char** argv) {
     std::vector<YoloDetection> sceneDetections;
     sceneDetections.reserve(5);
 
+    // -----------------------------------------------------------------------
+    // Bido's section – navigable-distance path planning
+    // -----------------------------------------------------------------------
+    // Action client for Nav2's ComputePathToPose — asks the global planner to
+    // plan a path without executing it, so we can measure real path length.
+    using ComputePathToPose = nav2_msgs::action::ComputePathToPose;
+    auto path_planner_client = rclcpp_action::create_client<ComputePathToPose>(
+        node, "compute_path_to_pose");
+
+    // Helper: ask Nav2 global planner for the path length between two map
+    // poses.  Returns -1.0 on failure (unreachable / server unavailable).
+    auto getNavigablePathLength = [&](double from_x, double from_y,
+                                      double to_x,   double to_y) -> double {
+        // Need planner server running; give it up to 2 s on first call
+        if (!path_planner_client->wait_for_action_server(
+                std::chrono::seconds(2))) {
+            RCLCPP_WARN(node->get_logger(),
+                "compute_path_to_pose server not available; falling back to Euclidean");
+            double dx = to_x - from_x, dy = to_y - from_y;
+            return std::sqrt(dx*dx + dy*dy);
+        }
+
+        // Build goal: use explicit start pose so we don't need the robot to
+        // be at from_x/from_y right now.
+        auto goal = ComputePathToPose::Goal();
+        goal.use_start = true;
+
+        goal.start.header.frame_id = "map";
+        goal.start.header.stamp    = node->now();
+        goal.start.pose.position.x = from_x;
+        goal.start.pose.position.y = from_y;
+        goal.start.pose.orientation.w = 1.0;  // heading doesn't affect length
+
+        goal.goal.header.frame_id  = "map";
+        goal.goal.header.stamp     = node->now();
+        goal.goal.pose.position.x  = to_x;
+        goal.goal.pose.position.y  = to_y;
+        goal.goal.pose.orientation.w = 1.0;
+
+        goal.planner_id = "";  // use default planner (GridBased / NavFn)
+
+        // Send goal and wait (blocking, planning-only — no motion)
+        auto goal_handle_future = path_planner_client->async_send_goal(goal);
+        if (rclcpp::spin_until_future_complete(node, goal_handle_future,
+                std::chrono::seconds(5)) != rclcpp::FutureReturnCode::SUCCESS) {
+            RCLCPP_WARN(node->get_logger(),
+                "compute_path_to_pose: send_goal timed out");
+            double dx = to_x - from_x, dy = to_y - from_y;
+            return std::sqrt(dx*dx + dy*dy);
+        }
+
+        auto goal_handle = goal_handle_future.get();
+        if (!goal_handle) {
+            RCLCPP_WARN(node->get_logger(),
+                "compute_path_to_pose: goal rejected");
+            double dx = to_x - from_x, dy = to_y - from_y;
+            return std::sqrt(dx*dx + dy*dy);
+        }
+
+        auto result_future = path_planner_client->async_get_result(goal_handle);
+        if (rclcpp::spin_until_future_complete(node, result_future,
+                std::chrono::seconds(10)) != rclcpp::FutureReturnCode::SUCCESS) {
+            RCLCPP_WARN(node->get_logger(),
+                "compute_path_to_pose: result timed out");
+            double dx = to_x - from_x, dy = to_y - from_y;
+            return std::sqrt(dx*dx + dy*dy);
+        }
+
+        auto result = result_future.get();
+        if (result.code != rclcpp_action::ResultCode::SUCCEEDED) {
+            RCLCPP_WARN(node->get_logger(),
+                "compute_path_to_pose: planning failed (unreachable?)");
+            return -1.0;
+        }
+
+        // Sum arc length of the returned path
+        const auto& poses = result.result->path.poses;
+        double length = 0.0;
+        for (size_t i = 1; i < poses.size(); ++i) {
+            double dx = poses[i].pose.position.x - poses[i-1].pose.position.x;
+            double dy = poses[i].pose.position.y - poses[i-1].pose.position.y;
+            length += std::sqrt(dx*dx + dy*dy);
+        }
+        RCLCPP_DEBUG(node->get_logger(),
+            "Navigable length (%.2f,%.2f)->(%.2f,%.2f) = %.3f m",
+            from_x, from_y, to_x, to_y, length);
+        return length;
+    };
+
+    // Greedy nearest-navigable-neighbour ordering.
+    // Called once from INIT with the real AMCL starting pose.
+    // visitOrder[i] = index into boxes.coords for the i-th stop.
+    std::vector<int> visitOrder;
+    auto buildVisitOrder = [&](double start_x, double start_y) {
+        int n = static_cast<int>(boxes.coords.size());
+        std::vector<bool> visited(n, false);
+        visitOrder.clear();
+        visitOrder.reserve(n);
+
+        double cx = start_x, cy = start_y;
+
+        for (int step = 0; step < n; ++step) {
+            int    best     = -1;
+            double bestCost = std::numeric_limits<double>::max();
+
+            for (int j = 0; j < n; ++j) {
+                if (visited[j]) continue;
+                double cost = getNavigablePathLength(
+                    cx, cy,
+                    boxes.coords[j][0], boxes.coords[j][1]);
+
+                // -1 means unreachable; treat as worst case
+                if (cost < 0.0) cost = std::numeric_limits<double>::max();
+
+                if (cost < bestCost) { bestCost = cost; best = j; }
+            }
+
+            // If all remaining goals are unreachable, fall back to Euclidean
+            // distance to avoid invalid indexing (best == -1).
+            if (best == -1 || bestCost == std::numeric_limits<double>::max()) {
+                best = -1;
+                bestCost = std::numeric_limits<double>::max();
+                for (int j = 0; j < n; ++j) {
+                    if (visited[j]) continue;
+                    double dx = boxes.coords[j][0] - cx;
+                    double dy = boxes.coords[j][1] - cy;
+                    double cost = std::sqrt(dx*dx + dy*dy);
+                    if (cost < bestCost) { bestCost = cost; best = j; }
+                }
+                if (best == -1) {
+                    RCLCPP_WARN(node->get_logger(),
+                        "[PathPlan] No remaining boxes to visit (unexpected).");
+                    break;
+                }
+                RCLCPP_WARN(node->get_logger(),
+                    "[PathPlan] All navigable paths failed; falling back to Euclidean ordering.");
+            }
+
+            visited[best] = true;
+            visitOrder.push_back(best);
+            cx = boxes.coords[best][0];
+            cy = boxes.coords[best][1];
+
+            RCLCPP_INFO(node->get_logger(),
+                "[PathPlan] step %d -> box %d  (x=%.2f, y=%.2f, phi=%.2f)  "
+                "navigable dist=%.2f m",
+                step, best,
+                boxes.coords[best][0],
+                boxes.coords[best][1],
+                boxes.coords[best][2],
+                bestCost);
+        }
+    };
+    // -----------------------------------------------------------------------
+
     // YOLO cooldown (1s)
     auto lastYoloTime = std::chrono::steady_clock::time_point::min();
 
@@ -151,7 +303,7 @@ int main(int argc, char** argv) {
     auto runYoloDetection = [&](CameraSource camera, bool save_image) -> YoloDetection {
         auto now = std::chrono::steady_clock::now();
         if (now - lastYoloTime < std::chrono::seconds(1)) {
-            RCLCPP_INFO(node->get_logger(), "YOLO: cooldown active, skipping detection");
+            // RCLCPP_INFO(node->get_logger(), "YOLO: cooldown active, skipping detection");
             return {"", -1.0f, x, y, phi, false};
         }
         lastYoloTime = now;
@@ -183,28 +335,43 @@ int main(int argc, char** argv) {
         
         /***YOUR CODE HERE***/
         //Keeping track of pose consistently 
-        x=robotPose.x;
-        y=robotPose.y;
-        phi=robotPose.phi;
+        
+
+        while (x == 0.0 && y == 0.0 && phi == 0.0) {
+            x=robotPose.x;
+            y=robotPose.y;
+            phi=robotPose.phi;
+            RCLCPP_INFO_THROTTLE(node->get_logger(),
+                        *node->get_clock(), 2000,   // log every 2s to avoid spam
+                        "INIT: Waiting for valid AMCL pose...");       
+        }
 
         switch(currentState) //using switch function for FSM. Similar to If/Else but better practice and easier to change according to google
         {
-            case RobotState::INIT: //case is pretty much the "if". Here it implies if currentState==INIT
-                initial_x=x;
-                initial_y=y;
-                initial_phi=phi;
-                //outputting initial pose
-                RCLCPP_INFO(node->get_logger(), "Start pose saved. x=%.2f, y=%.2f, phi=%.2f. Transitioning to Object Pickup", initial_x, initial_y, initial_phi);
-                currentState=RobotState::PICKUP_OBJECT; //this transitions FSM to next state to pick up the object off the robot
-                break; //uses break to ensure you do not just go to the next case
+            case RobotState::INIT:
+
+                initial_x   = x;
+                initial_y   = y;
+                initial_phi = phi;
+                RCLCPP_INFO(node->get_logger(),
+                    "Start pose saved. x=%.2f, y=%.2f, phi=%.2f. "
+                    "Building navigable visit order...",
+                    initial_x, initial_y, initial_phi);
+
+                buildVisitOrder(
+                    static_cast<double>(initial_x),
+                    static_cast<double>(initial_y));
+
+                currentState = RobotState::PICKUP_OBJECT;
+                break;
             
-            case RobotState::PICKUP_OBJECT: //code to pick up object right away so it does not fall when moving
+            case RobotState::PICKUP_OBJECT: { //code to pick up object right away so it does not fall when moving
                 // Nick + Ahmed's section
 
                 // NOTE: may want fallback here for if pickup fails. Set targetObject to some default and retry to
                 // pickup object a certain amount of times maybe
 
-                RCLCPP_INFO(node->get_logger(), "Detecting and picking up object.");
+                // RCLCPP_INFO(node->get_logger(), "Detecting and picking up object.");
                 // TODO: (Nick) Call yolo.getObjectName(CameraSource::WRIST, true) and store yolo object name
                 YoloDetection det = runYoloDetection(CameraSource::WRIST, true); // save image of manipulable object
                 if (!det.valid) {
@@ -222,61 +389,64 @@ int main(int argc, char** argv) {
                     targetObject = manipulableObjectName;
                 }
 
-                // Ahmed's section — pick sequence using arm_controller
+                // Ahmed's section — full arm pick sequence
                 {
+                    bool pickSuccess = false;
+
                     // Step 1: Open gripper before approaching
                     if (!arm.openGripper()) {
-                        RCLCPP_ERROR(node->get_logger(), "PICKUP: Failed to open gripper — retrying next loop");
-                        break;
+                        RCLCPP_ERROR(node->get_logger(), "PICKUP: Failed to open gripper");
                     }
-
-                    // Step 2: Move to pre-grasp pose (hover above object, gripper pointing down)
-                    //         pitch = PI/2 orients the gripper straight down
-                    bool pre_grasp_ok = arm.moveToCartesianPose(
-                        OBJ_ARM_X,
-                        OBJ_ARM_Y,
-                        OBJ_ARM_Z + 0.08,   // 8 cm above object centre
-                        0.0, M_PI / 2.0, 0.0
-                    );
-                    if (!pre_grasp_ok) {
-                        RCLCPP_ERROR(node->get_logger(), "PICKUP: Pre-grasp pose unreachable — retrying next loop");
-                        break;
+                    // Step 2: Pre-grasp hover — 8 cm above object, gripper pointing straight down (pitch = PI/2)
+                    else if (!arm.moveToCartesianPose(
+                        OBJ_ARM_X, OBJ_ARM_Y, OBJ_ARM_Z + 0.08,
+                        0.0, M_PI / 2.0, 0.0))
+                    {
+                        RCLCPP_ERROR(node->get_logger(), "PICKUP: Pre-grasp hover unreachable");
                     }
-
-                    // Step 3: Descend straight down to grasp height
-                    bool grasp_ok = arm.moveToCartesianPose(
-                        OBJ_ARM_X,
-                        OBJ_ARM_Y,
-                        OBJ_ARM_Z,
-                        0.0, M_PI / 2.0, 0.0
-                    );
-                    if (!grasp_ok) {
-                        RCLCPP_ERROR(node->get_logger(), "PICKUP: Grasp pose unreachable — retrying next loop");
-                        break;
+                    // Step 3: Descend straight down to object
+                    else if (!arm.moveToCartesianPose(
+                        OBJ_ARM_X, OBJ_ARM_Y, OBJ_ARM_Z,
+                        0.0, M_PI / 2.0, 0.0))
+                    {
+                        RCLCPP_ERROR(node->get_logger(), "PICKUP: Grasp pose unreachable");
                     }
-
                     // Step 4: Close gripper to grip the object
-                    if (!arm.closeGripper()) {
-                        RCLCPP_ERROR(node->get_logger(), "PICKUP: Failed to close gripper — retrying next loop");
-                        break;
+                    else if (!arm.closeGripper()) {
+                        RCLCPP_ERROR(node->get_logger(), "PICKUP: Failed to close gripper");
+                    }
+                    else {
+                        // Step 5: Brief pause to confirm grip is stable
+                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+                        // Step 6: Lift to safe carry height (15 cm above object)
+                        if (!arm.moveToCartesianPose(
+                            OBJ_ARM_X, OBJ_ARM_Y, OBJ_ARM_Z + 0.15,
+                            0.0, M_PI / 2.0, 0.0))
+                        {
+                            RCLCPP_WARN(node->get_logger(),
+                                "PICKUP: Lift step failed — object may still be gripped, continuing");
+                        }
+                        pickSuccess = true;
+                        pickAttempts = 0; // reset counter on success
                     }
 
-                    // Brief pause to confirm grip is stable
-                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
-
-                    // Step 5: Lift object up to safe carry height
-                    bool lift_ok = arm.moveToCartesianPose(
-                        OBJ_ARM_X,
-                        OBJ_ARM_Y,
-                        OBJ_ARM_Z + 0.15,   // 15 cm carry height clears obstacles
-                        0.0, M_PI / 2.0, 0.0
-                    );
-                    if (!lift_ok) {
-                        RCLCPP_WARN(node->get_logger(), "PICKUP: Lift failed — object may still be gripped, continuing");
+                    if (pickSuccess) {
+                        objectInArm = true;
+                        RCLCPP_INFO(node->get_logger(), "PICKUP: Object successfully picked up!");
+                    } else {
+                        pickAttempts++;
+                        RCLCPP_WARN(node->get_logger(),
+                            "PICKUP: Attempt %d/%d failed.", pickAttempts, MAX_PICK_ATTEMPTS);
+                        if (pickAttempts >= MAX_PICK_ATTEMPTS) {
+                            RCLCPP_ERROR(node->get_logger(),
+                                "PICKUP: Max attempts reached — skipping pickup, continuing without object.");
+                            pickAttempts = 0;
+                            objectInArm = false;
+                            currentState = RobotState::NAVIGATE_SCENE;
+                        }
+                        break; // retry next loop
                     }
-
-                    objectInArm = true;
-                    RCLCPP_INFO(node->get_logger(), "PICKUP: Object successfully picked up!");
                 }
 
                 //*****once the object is picked up set objectInArm=true;
@@ -290,42 +460,91 @@ int main(int argc, char** argv) {
                     //Could be good to have some fallback code here. Like reverse 0.2 metres then try again in case object dropped
                     break;
                 }
+            }
             
             case RobotState::NAVIGATE_SCENE:
-                //Bido's section
-                //probably best to define some functions outside here then call them tbh. Just so this doesn't get too bloated
-                
-                if(boxCounter<boxes.coords.size()) //if statement to make sure we check all boxes
+                // ---------------------------------------------------------------
+                // Bido's section – navigate to next scene object using the
+                // pre-computed nearest-neighbour visit order.
+                // ---------------------------------------------------------------
+                if (boxCounter < static_cast<int>(visitOrder.size()))
                 {
-                    //add navigation code here. Gemini TODO: nav.moveToGoal(boxes.coords[current_box_index][0], ...)
+                    // Retrieve optimised destination from visitOrder
+                    int targetIdx = visitOrder[boxCounter];
+                    double goal_x   = boxes.coords[targetIdx][0];
+                    double goal_y   = boxes.coords[targetIdx][1];
+                    double goal_phi = boxes.coords[targetIdx][2];
 
-                    //once navigation to box is done switch state to detecting object (YOLO)
-                    //if(navIsDone)
-                    RCLCPP_INFO(node->get_logger(), "Box successfully reached! Transitioning to YOLO detection");
-                    currentState=RobotState::DETECT_SCENE_OBJECT;
-                    break;
-                }
-                else //if we have hit every box then we return to start. Switching state to return to start
-                {
-                    if(!objectPlaced)//if statement just to let us know in terminal if object was successfully placed
-                    {
-                        RCLCPP_WARN(node->get_logger(), "Checked all boxes but didn't place object.");
+                    RCLCPP_INFO(node->get_logger(),
+                        "[NAVIGATE_SCENE] Moving to box %d (visit %d/%zu)  "
+                        "x=%.2f, y=%.2f, phi=%.2f",
+                        targetIdx, boxCounter + 1, visitOrder.size(),
+                        goal_x, goal_y, goal_phi);
+
+                    // nav.moveToGoal() blocks until Nav2 reports success/failure.
+                    bool navSuccess = nav.moveToGoal(goal_x, goal_y, goal_phi);
+
+                    if (navSuccess) {
+                        RCLCPP_INFO(node->get_logger(),
+                            "[NAVIGATE_SCENE] Box %d reached successfully.", targetIdx);
+                        currentState = RobotState::DETECT_SCENE_OBJECT;
+                    } else {
+                        // Navigation failed (obstacle, timeout, etc.).
+                        // Log and skip this box to avoid getting stuck, then
+                        // increment the counter so we try the next location.
+                        RCLCPP_WARN(node->get_logger(),
+                            "[NAVIGATE_SCENE] Failed to reach box %d. Skipping.", targetIdx);
+                        boxCounter++;
+                        // Stay in NAVIGATE_SCENE to attempt next box on next loop.
                     }
-                    currentState=RobotState::RETURN_HOME
                 }
+                else
+                {
+                    // All boxes visited
+                    if (!objectPlaced) {
+                        RCLCPP_WARN(node->get_logger(),
+                            "[NAVIGATE_SCENE] Checked all boxes but didn't place object.");
+                    }
+                    currentState = RobotState::RETURN_HOME;
+                }
+                // ---------------------------------------------------------------
                 break;
 
             case RobotState::DETECT_SCENE_OBJECT:
                 //Nick's section
                 // TODO: (Nick) Call yolo.getObjectName(CameraSource::OAKD, true) and store yolo object name
-                RCLCPP_INFO(node->get_logger(), "Detecting scene object.");
-                
+                {
+                    auto now = std::chrono::steady_clock::now();
+                    if (sceneDetectAttempts == 0) {
+                        sceneDetectStart = now;
+                        RCLCPP_INFO(node->get_logger(), "Detecting scene object.");
+                    }
+                    // Throttle attempts to ~1 Hz to avoid log spam and busy looping
+                    if (now - lastSceneDetectAttempt < std::chrono::seconds(1)) {
+                        break;
+                    }
+                    lastSceneDetectAttempt = now;
+                }
+
                 {
                     YoloDetection det = runYoloDetection(CameraSource::OAKD, false); // no scene object images saved
                     if (!det.valid) {
+                        sceneDetectAttempts++;
+                        auto elapsed = std::chrono::steady_clock::now() - sceneDetectStart;
+                        if (sceneDetectAttempts >= 6 || elapsed > std::chrono::seconds(8)) {
+                            RCLCPP_WARN(node->get_logger(),
+                                "Scene detection failed after %d attempts; skipping this box.",
+                                sceneDetectAttempts);
+                            sceneDetectAttempts = 0;
+                            currentState = RobotState::NAVIGATE_SCENE;
+                            boxCounter++;
+                        }
                         // Try again next loop if detection is invalid
                         break;
                     }
+
+                    sceneDetectAttempts = 0;
+                    lastSceneDetectAttempt = std::chrono::steady_clock::time_point::min();
 
                     // Store scene object in vector if space left
                     yoloObjectName = det.name;
@@ -342,14 +561,14 @@ int main(int argc, char** argv) {
             
             case RobotState::CHECK_MATCH:
                 //Nick's section also - check if object matches what we need 
-                //template I used but feel free to change below
                 if(yoloObjectName==targetObject) //if there is a match go to placing object state
                 {
                     RCLCPP_INFO(node->get_logger(), "Object Matches!");
                     currentState=RobotState::PLACE_IN_BIN;
-                    boxCounter++; //incrementing the boxCounter to get ready to move on after object placement
+                    // NOTE: boxCounter is incremented AFTER placement succeeds
+                    // (see PLACE_IN_BIN), so we do NOT increment it here.
                 }
-                else //otherwise we continue onwards to the next bin immediately
+                else //otherwise move on to the next bin
                 {
                     boxCounter++;
                     currentState=RobotState::NAVIGATE_SCENE;
@@ -362,87 +581,89 @@ int main(int argc, char** argv) {
 
                 // Ahmed's section — AprilTag localisation + arm place sequence
                 {
-                    // Step 1: Identify the AprilTag on the bin in front of the current scene object.
-                    //         Tag IDs are assumed to match the box index (0-indexed).
-                    //         Adjust tag_id mapping if the TAs use a different numbering scheme.
-                    int tag_id = boxCounter - 1; // boxCounter was already incremented in CHECK_MATCH
-                    std::vector<int> candidates = {tag_id};
+                    // The tag ID matches the original box index from coords.xml.
+                    // boxCounter has NOT been incremented yet (that happens after success),
+                    // so visitOrder[boxCounter] gives the correct current box index.
+                    int tag_id = visitOrder[boxCounter];
 
-                    RCLCPP_INFO(node->get_logger(), "PLACE: Looking for AprilTag ID %d ...", tag_id);
+                    RCLCPP_INFO(node->get_logger(),
+                        "PLACE: Looking for AprilTag ID %d ...", tag_id);
 
-                    std::vector<int> visible = tag_detector.getVisibleTags(candidates, 2000);
+                    // Step 1: Check AprilTag is visible (timeout 2 s)
+                    std::vector<int> visible = tag_detector.getVisibleTags({tag_id}, 2000);
                     if (visible.empty()) {
-                        RCLCPP_WARN(node->get_logger(), "PLACE: AprilTag %d not visible yet — retrying next loop", tag_id);
+                        RCLCPP_WARN(node->get_logger(),
+                            "PLACE: AprilTag %d not visible yet — retrying next loop", tag_id);
                         break; // stay in PLACE_IN_BIN, try again
                     }
 
-                    // Step 2: Get bin pose in base_link frame from the AprilTag
+                    // Step 2: Get bin pose from AprilTag (in base_link frame)
                     auto bin_pose_opt = tag_detector.getTagPose(tag_id, 2000);
                     if (!bin_pose_opt.has_value()) {
-                        RCLCPP_WARN(node->get_logger(), "PLACE: Could not get pose for tag %d — retrying", tag_id);
+                        RCLCPP_WARN(node->get_logger(),
+                            "PLACE: Could not get pose for tag %d — retrying", tag_id);
                         break;
                     }
                     geometry_msgs::msg::Pose bin_pose = bin_pose_opt.value();
 
                     RCLCPP_INFO(node->get_logger(),
-                        "PLACE: Bin localised at base_link (%.3f, %.3f, %.3f)",
-                        bin_pose.position.x, bin_pose.position.y, bin_pose.position.z);
+                        "PLACE: Bin localised — camera frame (%.3f, %.3f, %.3f)",
+                        bin_pose.position.x,
+                        bin_pose.position.y,
+                        bin_pose.position.z);
 
-                    // Step 3: Convert bin pose (base_link frame) → arm base frame.
-                    //         The AprilTag is mounted on the front face of the bin.
-                    //         We target the bin opening centre: offset 5 cm back from the tag face.
-                    double bin_arm_x = bin_pose.position.z - 0.05;   // depth forward (camera Z = arm X)
-                    double bin_arm_y = -bin_pose.position.x;          // lateral (camera X = -arm Y)
-                    double bin_arm_z =  bin_pose.position.y + 0.08;   // bin top rim height
+                    // Step 3: Convert AprilTag pose (camera/base_link frame) → arm base frame.
+                    //   Camera Z (depth forward) maps to arm X (reach forward).
+                    //   Camera X (lateral)       maps to arm -Y.
+                    //   Bin top rim is ~5 cm above the tag centre height.
+                    double bin_arm_x = bin_pose.position.z - 0.05;  // depth → arm forward, back off tag face
+                    double bin_arm_y = -bin_pose.position.x;         // lateral flip
+                    double bin_arm_z =  bin_pose.position.y + 0.05;  // bin top rim height
 
-                    // Step 4: Move to pre-place hover (above bin opening)
-                    bool pre_place_ok = arm.moveToCartesianPose(
-                        bin_arm_x,
-                        bin_arm_y,
-                        bin_arm_z + 0.10,   // 10 cm above bin rim
-                        0.0, M_PI / 2.0, 0.0
-                    );
-                    if (!pre_place_ok) {
-                        RCLCPP_ERROR(node->get_logger(), "PLACE: Pre-place pose unreachable — retrying");
-                        break;
+                    bool placeSuccess = false;
+
+                    // Step 4: Pre-place hover — 10 cm above bin opening, gripper pointing down
+                    if (!arm.moveToCartesianPose(
+                        bin_arm_x, bin_arm_y, bin_arm_z + 0.10,
+                        0.0, M_PI / 2.0, 0.0))
+                    {
+                        RCLCPP_ERROR(node->get_logger(), "PLACE: Pre-place hover unreachable — retrying");
                     }
-
                     // Step 5: Lower object into bin
-                    bool lower_ok = arm.moveToCartesianPose(
-                        bin_arm_x,
-                        bin_arm_y,
-                        bin_arm_z,
-                        0.0, M_PI / 2.0, 0.0
-                    );
-                    if (!lower_ok) {
+                    else if (!arm.moveToCartesianPose(
+                        bin_arm_x, bin_arm_y, bin_arm_z,
+                        0.0, M_PI / 2.0, 0.0))
+                    {
                         RCLCPP_ERROR(node->get_logger(), "PLACE: Could not lower into bin — retrying");
-                        break;
                     }
-
                     // Step 6: Open gripper to release object
-                    if (!arm.openGripper()) {
+                    else if (!arm.openGripper()) {
                         RCLCPP_ERROR(node->get_logger(), "PLACE: Gripper release failed — retrying");
-                        break;
+                    }
+                    else {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+
+                        // Step 7: Retract arm up and clear of bin
+                        arm.moveToCartesianPose(
+                            bin_arm_x, bin_arm_y, bin_arm_z + 0.15,
+                            0.0, M_PI / 2.0, 0.0);
+
+                        placeSuccess = true;
                     }
 
-                    std::this_thread::sleep_for(std::chrono::milliseconds(400));
-
-                    // Step 7: Retract arm back to carry height (clear of bin)
-                    arm.moveToCartesianPose(
-                        bin_arm_x,
-                        bin_arm_y,
-                        bin_arm_z + 0.15,
-                        0.0, M_PI / 2.0, 0.0
-                    );
-
-                    objectPlaced = true;
-                    objectInArm  = false;
-                    RCLCPP_INFO(node->get_logger(), "PLACE: Object successfully placed in bin!");
+                    if (placeSuccess) {
+                        objectPlaced = true;
+                        objectInArm  = false;
+                        RCLCPP_INFO(node->get_logger(), "PLACE: Object successfully placed in bin!");
+                    } else {
+                        break; // retry from top of PLACE_IN_BIN next loop
+                    }
                 }
 
                 //objectPlaced=true;
                 if (objectPlaced)//once its in the bin we continue to next box
                 {
+                    boxCounter++; // Bido: increment here, after successful placement
                     currentState=RobotState::NAVIGATE_SCENE;
                     break;
                 }
@@ -453,12 +674,30 @@ int main(int argc, char** argv) {
                 }
             
             case RobotState::RETURN_HOME:
-                //Bido's section also
-                RCLCPP_INFO(node->get_logger(), "Returning to start coordinates");
-                //gemini recommended: TODO: nav.moveToGoal(start_x, start_y, start_phi)
+                // ---------------------------------------------------------------
+                // Bido's section – navigate back to the recorded starting pose.
+                // ---------------------------------------------------------------
+                RCLCPP_INFO(node->get_logger(),
+                    "[RETURN_HOME] Navigating back to start: x=%.2f, y=%.2f, phi=%.2f",
+                    initial_x, initial_y, initial_phi);
 
+                {
+                    bool homeSuccess = nav.moveToGoal(
+                        static_cast<double>(initial_x),
+                        static_cast<double>(initial_y),
+                        static_cast<double>(initial_phi));
 
-                currentState = RobotState::WRITE_OUTPUTS; //last state to save all the data to txt file. We could do this as we go instead
+                    if (homeSuccess) {
+                        RCLCPP_INFO(node->get_logger(),
+                            "[RETURN_HOME] Successfully returned to start position.");
+                    } else {
+                        RCLCPP_WARN(node->get_logger(),
+                            "[RETURN_HOME] Could not reach start exactly – proceeding to output.");
+                    }
+                }
+                // ---------------------------------------------------------------
+
+                currentState = RobotState::WRITE_OUTPUTS;
                 break;
 
             case RobotState::WRITE_OUTPUTS: //state to save txt file. Might move this cause if we don't finish it won't write the data
