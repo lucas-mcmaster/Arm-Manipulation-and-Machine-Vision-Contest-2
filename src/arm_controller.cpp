@@ -1,9 +1,6 @@
 #include "mie443_contest2/arm_controller.h"
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
-#include <thread>
-#include <chrono>
-#include <cmath>
 
 ArmController::ArmController(std::shared_ptr<rclcpp::Node> node) : node_(node) {
 	RCLCPP_INFO(node_->get_logger(), "Initializing ArmController...");
@@ -133,76 +130,4 @@ bool ArmController::openGripper() {
 bool ArmController::closeGripper() {
 	RCLCPP_INFO(node_->get_logger(), "Closing gripper...");
 	return moveGripper(0.0);  // Closed position
-}
-
-// ── moveToHome ───────────────────────────────────────────────────────────────
-// Retracts the arm to a safe carry/idle pose for robot navigation.
-// The arm points straight up (pitch = -π/2) so it clears the camera and obstacles.
-// *** Tune the x/y/z values in simulation before contest day ***
-bool ArmController::moveToHome() {
-	RCLCPP_INFO(node_->get_logger(), "Moving arm to home/carry pose...");
-	return moveToCartesianPose(
-		0.00,        // x — centred over arm mount
-		0.00,        // y — no lateral offset
-		0.25,        // z — 25 cm above mount, clears top plate and camera
-		0.0,         // roll
-		-M_PI_2,     // pitch — gripper pointing straight up
-		0.0          // yaw
-	);
-}
-
-
-// High-level pick sequence for the manipulable object sitting on the top plate.
-// Coordinates (x, y, z) are in the arm base frame, provided by TAs on contest day.
-// Sequence: open → pre-grasp hover → descend → grip → lift.
-// Note: the caller (contest2.cpp PICKUP_OBJECT state) handles the full sequence
-// step-by-step using moveToCartesianPose / openGripper / closeGripper directly,
-// so this method is provided as a convenience wrapper for testing.
-bool ArmController::pickObject(double x, double y, double z) {
-	RCLCPP_INFO(node_->get_logger(), "pickObject called: (%.3f, %.3f, %.3f)", x, y, z);
-
-	if (!openGripper()) return false;
-
-	// Pre-grasp: hover 8 cm above object, gripper pointing down (pitch = PI/2)
-	if (!moveToCartesianPose(x, y, z + 0.08, 0.0, M_PI / 2.0, 0.0)) return false;
-
-	// Descend to object
-	if (!moveToCartesianPose(x, y, z, 0.0, M_PI / 2.0, 0.0)) return false;
-
-	if (!closeGripper()) return false;
-
-	std::this_thread::sleep_for(std::chrono::milliseconds(500));
-
-	// Lift to carry height
-	if (!moveToCartesianPose(x, y, z + 0.15, 0.0, M_PI / 2.0, 0.0)) {
-		RCLCPP_WARN(node_->get_logger(), "pickObject: lift step failed — object may still be held");
-	}
-
-	RCLCPP_INFO(node_->get_logger(), "pickObject complete.");
-	return true;
-}
-
-// ── placeObject ─────────────────────────────────────────────────────────────
-// High-level place sequence to drop the held object into a bin.
-// (x, y, z) = bin opening centre in arm base frame (derived from AprilTag pose).
-// Sequence: hover above bin → lower in → open gripper → retract.
-bool ArmController::placeObject(double x, double y, double z) {
-	RCLCPP_INFO(node_->get_logger(), "placeObject called: (%.3f, %.3f, %.3f)", x, y, z);
-
-	// Pre-place hover
-	if (!moveToCartesianPose(x, y, z + 0.10, 0.0, M_PI / 2.0, 0.0)) return false;
-
-	// Lower into bin
-	if (!moveToCartesianPose(x, y, z, 0.0, M_PI / 2.0, 0.0)) return false;
-
-	// Release
-	if (!openGripper()) return false;
-
-	std::this_thread::sleep_for(std::chrono::milliseconds(400));
-
-	// Retract
-	moveToCartesianPose(x, y, z + 0.15, 0.0, M_PI / 2.0, 0.0);
-
-	RCLCPP_INFO(node_->get_logger(), "placeObject complete.");
-	return true;
 }
