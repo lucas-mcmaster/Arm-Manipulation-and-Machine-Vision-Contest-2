@@ -113,6 +113,9 @@ int main(int argc, char** argv) {
     std::string manipulableObjectName=""; // manipulable object (on top of turtlebot) identified from yolo
     float manipulableObjectConfidence=-1.0f; // manipulable object confidence identified from yolo
     bool manipulableObjectLatched=false; // latch first valid pickup detection to avoid overwriting
+    int sceneDetectAttempts=0; // retry counter for scene object detection
+    auto sceneDetectStart = std::chrono::steady_clock::time_point::min();
+    auto lastSceneDetectAttempt = std::chrono::steady_clock::time_point::min();
 
     // Struct for returned values from YOLO detection in helper below
     struct YoloDetection {
@@ -243,6 +246,27 @@ int main(int argc, char** argv) {
                 if (cost < 0.0) cost = std::numeric_limits<double>::max();
 
                 if (cost < bestCost) { bestCost = cost; best = j; }
+            }
+
+            // If all remaining goals are unreachable, fall back to Euclidean
+            // distance to avoid invalid indexing (best == -1).
+            if (best == -1 || bestCost == std::numeric_limits<double>::max()) {
+                best = -1;
+                bestCost = std::numeric_limits<double>::max();
+                for (int j = 0; j < n; ++j) {
+                    if (visited[j]) continue;
+                    double dx = boxes.coords[j][0] - cx;
+                    double dy = boxes.coords[j][1] - cy;
+                    double cost = std::sqrt(dx*dx + dy*dy);
+                    if (cost < bestCost) { bestCost = cost; best = j; }
+                }
+                if (best == -1) {
+                    RCLCPP_WARN(node->get_logger(),
+                        "[PathPlan] No remaining boxes to visit (unexpected).");
+                    break;
+                }
+                RCLCPP_WARN(node->get_logger(),
+                    "[PathPlan] All navigable paths failed; falling back to Euclidean ordering.");
             }
 
             visited[best] = true;
@@ -422,14 +446,38 @@ int main(int argc, char** argv) {
             case RobotState::DETECT_SCENE_OBJECT:
                 //Nick's section
                 // TODO: (Nick) Call yolo.getObjectName(CameraSource::OAKD, true) and store yolo object name
-                RCLCPP_INFO(node->get_logger(), "Detecting scene object.");
-                
+                {
+                    auto now = std::chrono::steady_clock::now();
+                    if (sceneDetectAttempts == 0) {
+                        sceneDetectStart = now;
+                        RCLCPP_INFO(node->get_logger(), "Detecting scene object.");
+                    }
+                    // Throttle attempts to ~1 Hz to avoid log spam and busy looping
+                    if (now - lastSceneDetectAttempt < std::chrono::seconds(1)) {
+                        break;
+                    }
+                    lastSceneDetectAttempt = now;
+                }
+
                 {
                     YoloDetection det = runYoloDetection(CameraSource::OAKD, false); // no scene object images saved
                     if (!det.valid) {
+                        sceneDetectAttempts++;
+                        auto elapsed = std::chrono::steady_clock::now() - sceneDetectStart;
+                        if (sceneDetectAttempts >= 6 || elapsed > std::chrono::seconds(8)) {
+                            RCLCPP_WARN(node->get_logger(),
+                                "Scene detection failed after %d attempts; skipping this box.",
+                                sceneDetectAttempts);
+                            sceneDetectAttempts = 0;
+                            currentState = RobotState::NAVIGATE_SCENE;
+                            boxCounter++;
+                        }
                         // Try again next loop if detection is invalid
                         break;
                     }
+
+                    sceneDetectAttempts = 0;
+                    lastSceneDetectAttempt = std::chrono::steady_clock::time_point::min();
 
                     // Store scene object in vector if space left
                     yoloObjectName = det.name;

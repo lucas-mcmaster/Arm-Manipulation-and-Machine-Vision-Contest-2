@@ -4,17 +4,17 @@
 
 1. Launch AMCL (on laptop terminal)
 ```cpp
-ros2 launch turtlebot4_navigation localization.launch.py map:=/home/nicolas-rebollo/ros2_ws/src/mie443_contest2/maps/Contest2MapPractice.yaml use_sim_time:=true
+ros2 launch turtlebot4_navigation localization.launch.py map:=/home/nicolas-rebollo/ros2_ws/src/mie443_contest2/maps/Contest2MapPractice.yaml
 ```
 
 2. Initialize NAV2 (on laptop terminal)
 ```cpp
-ros2 launch turtlebot4_navigation nav2.launch.py use_sim_time:=true
+ros2 launch turtlebot4_navigation nav2.launch.py
 ```
 
 3. Start up RVIZ for nav2 (on laptop terminal)
 ```cpp
-ros2 launch turtlebot4_viz view_navigation.launch.py use_sim_time:=true
+ros2 launch turtlebot4_viz view_navigation.launch.py
 ```
 
 4. Start MoveIt2 on Turtlebot (SSH)
