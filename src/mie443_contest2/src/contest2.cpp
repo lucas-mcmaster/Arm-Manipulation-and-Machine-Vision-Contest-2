@@ -207,7 +207,7 @@ int main(int argc, char** argv) {
         }
 
         auto result_future = path_planner_client->async_get_result(goal_handle);
-        if (rclcpp::spin_until_future_complete(node, result_future,
+        if p(rclcpp::sin_until_future_complete(node, result_future,
                 std::chrono::seconds(10)) != rclcpp::FutureReturnCode::SUCCESS) {
             RCLCPP_WARN(node->get_logger(),
                 "compute_path_to_pose: result timed out");
@@ -368,7 +368,7 @@ int main(int argc, char** argv) {
                     static_cast<double>(initial_x),
                     static_cast<double>(initial_y));
 
-                currentState = RobotState::PICKUP_OBJECT;
+                currentState = RobotState::NAVIGATE_SCENE;
                 break;
             
             case RobotState::PICKUP_OBJECT: { //code to pick up object right away so it does not fall when moving
@@ -475,11 +475,22 @@ int main(int argc, char** argv) {
                 // ---------------------------------------------------------------
                 if (boxCounter < static_cast<int>(visitOrder.size()))
                 {
+
+                    // offset to avoid collision and nav2 failure
+                    double offset = 0.5; // m
+
                     // Retrieve optimised destination from visitOrder
                     int targetIdx = visitOrder[boxCounter];
-                    double goal_x   = boxes.coords[targetIdx][0];
-                    double goal_y   = boxes.coords[targetIdx][1];
-                    double goal_phi = boxes.coords[targetIdx][2] + M_PI;
+                    double goal_phi = boxes.coords[targetIdx][2];
+                    double goal_x   = boxes.coords[targetIdx][0] + offset * cos(goal_phi);
+                    double goal_y   = boxes.coords[targetIdx][1] + offset * sin(goal_phi);
+
+
+                    // Fallback navigation with no offset
+                    // double goal_x   = boxes.coords[targetIdx][0];
+                    // double goal_y   = boxes.coords[targetIdx][1];
+
+                    goal_phi += M_PI;
 
                     // Normalize goal_phi
                     if (goal_phi > M_PI) goal_phi -= 2*M_PI;
