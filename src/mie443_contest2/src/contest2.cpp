@@ -378,7 +378,7 @@ int main(int argc, char** argv) {
 
                 // Step 1: Move arm to hover position above object FIRST (for wrist cam to see it clearly)
                 if (!arm.moveToCartesianPose(
-                    OBJ_ARM_X, OBJ_ARM_Y, OBJ_ARM_Z + 0.08,
+                    OBJ_ARM_X, OBJ_ARM_Y, OBJ_ARM_Z + 0.08, //WE SHOULD UP THIS --- HAVE ROBOT A DECENT HEIGHT ABOVE SO GOAL DOES NOT GET REJECTED AND ROBOT DOES NOT HIT CUP ON THE WAY TO IT -Lucas
                     0.0, M_PI / 2.0, 0.0))
                 {
                     RCLCPP_ERROR(node->get_logger(), "PICKUP: Pre-grasp hover unreachable — retrying");
