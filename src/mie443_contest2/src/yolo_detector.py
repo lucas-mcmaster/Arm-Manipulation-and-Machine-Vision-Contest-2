@@ -22,6 +22,15 @@ class YoloDetectorNode(Node):
         
         # Confidence threshold
         self.confidence_threshold = 0.6
+
+        # Allowed classes for contest logic (only these are considered valid)
+        self.allowed_classes = {
+            "clock",
+            "cup",
+            "bottle",
+            "motorcycle",
+            "potted plant",
+        }
         
         # Create service
         self.service = self.create_service(
@@ -64,8 +73,9 @@ class YoloDetectorNode(Node):
             return response
 
         # Filter by confidence threshold
-        mask = boxes.conf >= self.confidence_threshold
-        if not mask.any():
+        conf = boxes.conf.cpu().numpy()
+        conf_mask = conf >= self.confidence_threshold
+        if not conf_mask.any():
             response.success = False
             response.class_id = -1
             response.class_name = ""
@@ -73,12 +83,25 @@ class YoloDetectorNode(Node):
             response.message = f"No detections above {self.confidence_threshold} confidence"
             return response
 
-        # Detection successful
-        # Get highest confidence detection
-        best_idx = boxes.conf.argmax()
-        class_id = int(boxes.cls[best_idx])
-        confidence = float(boxes.conf[best_idx])
-        class_name = self.model.names[class_id]
+        # Filter by allowed classes
+        class_ids = boxes.cls.cpu().numpy().astype(int)
+        class_names = [self.model.names[i] for i in class_ids]
+        allowed_mask = np.array([name in self.allowed_classes for name in class_names], dtype=bool)
+        final_mask = conf_mask & allowed_mask
+        if not final_mask.any():
+            response.success = False
+            response.class_id = -1
+            response.class_name = ""
+            response.confidence = 0.0
+            response.message = "No allowed objects detected above confidence threshold"
+            return response
+
+        # Detection successful (highest confidence among allowed)
+        allowed_idxs = np.where(final_mask)[0]
+        best_idx = allowed_idxs[np.argmax(conf[allowed_idxs])]
+        class_id = int(class_ids[best_idx])
+        confidence = float(conf[best_idx])
+        class_name = class_names[best_idx]
 
         response.success = True
         response.class_id = class_id
@@ -86,10 +109,25 @@ class YoloDetectorNode(Node):
         response.confidence = confidence
         response.message = f"Detected {class_name}"
 
-        # Save image of detected object
+        # Save image with only allowed detections drawn
         if save_detected_image:
             filename = f"/home/nicolas-rebollo/YOLO Images/{class_name}.jpg"
-            annotated_image = results[0].plot()
+            annotated_image = image.copy()
+            boxes_xyxy = boxes.xyxy.cpu().numpy()
+            for i in allowed_idxs:
+                x1, y1, x2, y2 = boxes_xyxy[i].astype(int)
+                label = f"{class_names[i]} {conf[i]:.2f}"
+                cv2.rectangle(annotated_image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(
+                    annotated_image,
+                    label,
+                    (x1, max(0, y1 - 5)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (0, 255, 0),
+                    1,
+                    cv2.LINE_AA,
+                )
             cv2.imwrite(filename, annotated_image)
             self.get_logger().info(f"Saved detection image to {filename}")
 

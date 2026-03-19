@@ -527,7 +527,16 @@ int main(int argc, char** argv) {
                     float confidence = yolo.getConfidence();
                     bool has_name = !yoloObjectName.empty();
                     bool conf_ok = confidence >= 0.0f;
-                    YoloDetection det{yoloObjectName, confidence, has_name && conf_ok};
+
+                    // List of allowed objects
+                    bool objects_allowed =
+                        (yoloObjectName == "mouse") ||
+                        (yoloObjectName == "cup") ||
+                        (yoloObjectName == "bottle") ||
+                        (yoloObjectName == "motorcycle") ||
+                        (yoloObjectName == "potted plant");
+
+                    YoloDetection det{yoloObjectName, confidence, has_name && conf_ok && is_allowed};
                     auto yolo_call_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - yolo_call_start).count();
 
