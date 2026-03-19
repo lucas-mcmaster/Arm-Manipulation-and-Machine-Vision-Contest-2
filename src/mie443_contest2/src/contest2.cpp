@@ -197,9 +197,11 @@ int main(int argc, char** argv) {
     std::vector<int> visitOrder;
     auto buildVisitOrder = [&](double start_x, double start_y) {
         int n = static_cast<int>(boxes.coords.size());
-        std::vector<bool> visited(n, false);
+        std::vector<bool> visited(n, false); //TAKE A LOOK AT THIS REINIT EACH FUNC CALL MIGHT CAUSE ISSUES?? - Lucas
         visitOrder.clear();
         visitOrder.reserve(n);
+
+        float offset=0.5; //offset to add to path plan goal so not in box
 
         double cx = start_x, cy = start_y;
 
@@ -211,7 +213,7 @@ int main(int argc, char** argv) {
                 if (visited[j]) continue;
                 double cost = getNavigablePathLength(
                     cx, cy,
-                    boxes.coords[j][0], boxes.coords[j][1]);
+                    boxes.coords[j][0]+(offset*cos(boxes.coords[j][2])), boxes.coords[j][1]+(offset*sin(boxes.coords[j][2])));
 
                 // -1 means unreachable; treat as worst case
                 if (cost < 0.0) cost = std::numeric_limits<double>::max();
@@ -219,10 +221,17 @@ int main(int argc, char** argv) {
                 if (cost < bestCost) { bestCost = cost; best = j; }
             }
 
+            if (best == -1) {
+                //Fallback: just pick the first unvisited box if best stays -1 to prevent seg fault
+                for (int j = 0; j < n; ++j) {
+                    if (!visited[j]) { best = j; break; }
+                }
+            }
+
             visited[best] = true;
             visitOrder.push_back(best);
-            cx = boxes.coords[best][0];
-            cy = boxes.coords[best][1];
+            cx = boxes.coords[best][0] + (offset*cos(boxes.coords[best][2]));
+            cy = boxes.coords[best][1] + (offset*sin(boxes.coords[best][2]));
 
             RCLCPP_INFO(node->get_logger(),
                 "[PathPlan] step %d -> box %d  (x=%.2f, y=%.2f, phi=%.2f)  "
@@ -247,9 +256,17 @@ int main(int argc, char** argv) {
         //Keeping track of pose consistently 
 
         //LETS PRINT THESE TO SEE POSE CONSTANTLY?
-        x=robotPose.x;
-        y=robotPose.y;
-        phi=robotPose.phi;
+        //Waiting for AMCL pose to change
+        while (x == 0.0 && y == 0.0 && phi == 0.0) {
+            rclcpp::spin_some(node); //spinning node in while for AMCL updates
+            x=robotPose.x;
+            y=robotPose.y;
+            phi=robotPose.phi;
+            RCLCPP_INFO_THROTTLE(node->get_logger(),
+                        *node->get_clock(), 2000,   // log every 2s to avoid spam
+                        "INIT: Waiting for valid AMCL pose...");
+            std::this_thread::sleep_for(std::chrono::milliseconds(10)); //Prevent CPU throttling from constant node spinning     
+        }
 
         switch(currentState) //using switch function for FSM. Similar to If/Else but better practice and easier to change according to google
         {
@@ -286,17 +303,27 @@ int main(int argc, char** argv) {
                 // ---------------------------------------------------------------
                 if (boxCounter < static_cast<int>(visitOrder.size())) //DO WE NEED STATIC_CAST INT HERE? - Lucas
                 {
+                    /// offset to avoid collision and nav2 failure
+                    double offset = 0.5; // m
+
                     // Retrieve optimised destination from visitOrder
                     int targetIdx = visitOrder[boxCounter];
-                    double goal_x   = boxes.coords[targetIdx][0];
-                    double goal_y   = boxes.coords[targetIdx][1];
                     double goal_phi = boxes.coords[targetIdx][2];
+                    double goal_x   = boxes.coords[targetIdx][0] + offset * cos(goal_phi);
+                    double goal_y   = boxes.coords[targetIdx][1] + offset * sin(goal_phi);
+
 
                     RCLCPP_INFO(node->get_logger(),
                         "[NAVIGATE_SCENE] Moving to box %d (visit %d/%zu)  "
                         "x=%.2f, y=%.2f, phi=%.2f",
                         targetIdx, boxCounter + 1, visitOrder.size(),
                         goal_x, goal_y, goal_phi);
+
+                    //Spinning the robot 180 degrees to face back toward the box
+                    goal_phi = goal_phi + M_PI;
+
+                    //Normalize the angle to keep it strictly between -PI and +PI (Nav2 prefers this)
+                    goal_phi = atan2(sin(goal_phi), cos(goal_phi));
 
                     // nav.moveToGoal() blocks until Nav2 reports success/failure.
                     bool navSuccess = nav.moveToGoal(goal_x, goal_y, goal_phi);
@@ -353,9 +380,6 @@ int main(int argc, char** argv) {
                     }
                 }
                 // ---------------------------------------------------------------
-
-                currentState = RobotState::DONE;
-                break;
 
                 // Switch state to DONE
                 currentState = RobotState::DONE;
