@@ -39,28 +39,6 @@ int main(int argc, char** argv) {
 
     // Load the arm URDF and SRDF directly as node parameters so that
     // MoveGroupInterface builds the SO-ARM101 model
-    {
-        std::string desc_dir = ament_index_cpp::get_package_share_directory("lerobot_description");
-        std::ifstream urdf_file(desc_dir + "/urdf/so101.urdf");
-        if (urdf_file.is_open()) {
-            std::stringstream ss;
-            ss << urdf_file.rdbuf();
-            node->declare_parameter("robot_description", ss.str());
-        } else {
-            RCLCPP_ERROR(node->get_logger(), "Could not open arm URDF file");
-        }
-
-        std::string moveit_dir = ament_index_cpp::get_package_share_directory("lerobot_moveit");
-        std::ifstream srdf_file(moveit_dir + "/config/so101.srdf");
-        if (srdf_file.is_open()) {
-            std::stringstream ss;
-            ss << srdf_file.rdbuf();
-            node->declare_parameter("robot_description_semantic", ss.str());
-        } else {
-            RCLCPP_ERROR(node->get_logger(), "Could not open arm SRDF file");
-        }
-    }
-
     RCLCPP_INFO(node->get_logger(), "Contest 2 node started");
 
     // Robot pose object + subscriber
@@ -94,9 +72,6 @@ int main(int argc, char** argv) {
 
     //initializing external classes from other files
     Navigation nav(node); //these names can be changes as you'd like
-    YoloInterface yolo(node);
-    ArmController arm(node);
-    AprilTagDetector tag_detector(node);
 
     //FSM initialization
     RobotState currentState = RobotState::INIT;
@@ -123,10 +98,6 @@ int main(int argc, char** argv) {
         float phi;
         bool valid;
     };
-
-    // Scene detections (5 objects in maze)
-    std::vector<YoloDetection> sceneDetections;
-    sceneDetections.reserve(5);
 
     // -----------------------------------------------------------------------
     // Bido's section – navigable-distance path planning
@@ -157,8 +128,11 @@ int main(int argc, char** argv) {
 
         goal.start.header.frame_id = "map";
         goal.start.header.stamp    = node->now();
-        goal.start.pose.position.x = from_x;
+
+        //MIGHT NOT BE CORRECT-SHOULD BE GETTING START POSE FROM AMCL?
+        goal.start.pose.position.x = from_x; //LOOK AT THIS LATER - Lucas
         goal.start.pose.position.y = from_y;
+
         goal.start.pose.orientation.w = 1.0;  // heading doesn't affect length
 
         goal.goal.header.frame_id  = "map";
@@ -262,36 +236,6 @@ int main(int argc, char** argv) {
     };
     // -----------------------------------------------------------------------
 
-    // YOLO cooldown (1s)
-    auto lastYoloTime = std::chrono::steady_clock::time_point::min();
-
-    // Helper for YOLO detection in FSM cases (Nick's sections)
-    auto runYoloDetection = [&](CameraSource camera, bool save_image) -> YoloDetection {
-        auto now = std::chrono::steady_clock::now();
-        if (now - lastYoloTime < std::chrono::seconds(1)) {
-            RCLCPP_INFO(node->get_logger(), "YOLO: cooldown active, skipping detection");
-            return {"", -1.0f, x, y, phi, false};
-        }
-        lastYoloTime = now;
-
-        // Save detection
-        std::string detected = yolo.getObjectName(camera, save_image);
-
-        // Get detection confidence
-        float confidence = yolo.getConfidence();
-
-        // Warn about no valid detection or negative confidence
-        if (detected.empty() || confidence < 0.0f) {
-            RCLCPP_WARN(node->get_logger(), "YOLO: no valid detection");
-            return {"", -1.0f, x, y, phi, false};
-        }
-
-        // Store, print, and return detection
-        yoloConfidenceScore = confidence;
-        RCLCPP_INFO(node->get_logger(), "YOLO: %s (%.2f)", detected.c_str(), confidence);
-        return {detected, confidence, x, y, phi, true};
-    };
-
     while(rclcpp::ok() && secondsElapsed <= 300) {
         rclcpp::spin_some(node);
 
@@ -301,6 +245,8 @@ int main(int argc, char** argv) {
         
         /***YOUR CODE HERE***/
         //Keeping track of pose consistently 
+
+        //LETS PRINT THESE TO SEE POSE CONSTANTLY?
         x=robotPose.x;
         y=robotPose.y;
         phi=robotPose.phi;
@@ -320,63 +266,25 @@ int main(int argc, char** argv) {
                 // Bido's section – build visit order using real navigable distances
                 // from the Nav2 global planner (obstacle-aware path lengths).
                 // ---------------------------------------------------------------
+
+                //TAKE A LOOK AT THIS -- MAYBE STATIC CASTING TO DOUBLE CAUSING ISSUES?? - Lucas
                 buildVisitOrder(
                     static_cast<double>(initial_x),
                     static_cast<double>(initial_y));
                 // ---------------------------------------------------------------
 
                 RCLCPP_INFO(node->get_logger(),
-                    "Visit order ready (%zu boxes). Transitioning to PICKUP_OBJECT.",
+                    "Visit order ready (%zu boxes). Transitioning to NAVIGATE_SCENE.",
                     visitOrder.size());
-                currentState=RobotState::PICKUP_OBJECT;
+                currentState=RobotState::NAVIGATE_SCENE;
                 break;
-            
-            case RobotState::PICKUP_OBJECT: { //code to pick up object right away so it does not fall when moving
-                // Nick + Ahmed's section
-
-                // NOTE: may want fallback here for if pickup fails. Set targetObject to some default and retry to
-                // pickup object a certain amount of times maybe
-
-                RCLCPP_INFO(node->get_logger(), "Detecting and picking up object.");
-                // TODO: (Nick) Call yolo.getObjectName(CameraSource::WRIST, true) and store yolo object name
-                YoloDetection det = runYoloDetection(CameraSource::WRIST, true); // save image of manipulable object
-                if (!det.valid) {
-                    // Try again next loop if detection is invalid
-                    break;
-                }
-
-                // If detection is valid, store object name and confidence (latched on first valid)
-                if (!manipulableObjectLatched) {
-                    manipulableObjectName = det.name;
-                    manipulableObjectConfidence = det.confidence;
-                    manipulableObjectLatched = true;
-
-                    // Also set targetObject to Manipulable object
-                    targetObject = manipulableObjectName;
-                }
-
-                // TODO: (Ahmed) Call arm.moveToCartesianPose(...) and arm.moveGripper(...) to pick it up
-
-
-                //*****once the object is picked up set objectInArm=true;
-                if(objectInArm) //moving on to the next state if object is in the arm
-                {
-                    currentState=RobotState::NAVIGATE_SCENE;
-                    break;
-                }
-                else //if object not in arm we repeat this state until we get it.
-                {
-                    //Could be good to have some fallback code here. Like reverse 0.2 metres then try again in case object dropped
-                    break;
-                }
-            }
             
             case RobotState::NAVIGATE_SCENE:
                 // ---------------------------------------------------------------
                 // Bido's section – navigate to next scene object using the
                 // pre-computed nearest-neighbour visit order.
                 // ---------------------------------------------------------------
-                if (boxCounter < static_cast<int>(visitOrder.size()))
+                if (boxCounter < static_cast<int>(visitOrder.size())) //DO WE NEED STATIC_CAST INT HERE? - Lucas
                 {
                     // Retrieve optimised destination from visitOrder
                     int targetIdx = visitOrder[boxCounter];
@@ -396,7 +304,8 @@ int main(int argc, char** argv) {
                     if (navSuccess) {
                         RCLCPP_INFO(node->get_logger(),
                             "[NAVIGATE_SCENE] Box %d reached successfully.", targetIdx);
-                        currentState = RobotState::DETECT_SCENE_OBJECT;
+                             boxCounter++;
+                             //staying in navigate scene for testing
                     } else {
                         // Navigation failed (obstacle, timeout, etc.).
                         // Log and skip this box to avoid getting stuck, then
@@ -407,6 +316,7 @@ int main(int argc, char** argv) {
                         // Stay in NAVIGATE_SCENE to attempt next box on next loop.
                     }
                 }
+
                 else
                 {
                     // All boxes visited
@@ -419,64 +329,6 @@ int main(int argc, char** argv) {
                 // ---------------------------------------------------------------
                 break;
 
-            case RobotState::DETECT_SCENE_OBJECT:
-                //Nick's section
-                // TODO: (Nick) Call yolo.getObjectName(CameraSource::OAKD, true) and store yolo object name
-                RCLCPP_INFO(node->get_logger(), "Detecting scene object.");
-                
-                {
-                    YoloDetection det = runYoloDetection(CameraSource::OAKD, false); // no scene object images saved
-                    if (!det.valid) {
-                        // Try again next loop if detection is invalid
-                        break;
-                    }
-
-                    // Store scene object in vector if space left
-                    yoloObjectName = det.name;
-                    yoloConfidenceScore = det.confidence;
-                    if (sceneDetections.size() < 5) {
-                        sceneDetections.push_back(det);
-                    }
-                }
-
-                //Once a valid object is identified switch states to check match      
-                RCLCPP_INFO(node->get_logger(), "Object Identified");
-                currentState = RobotState::CHECK_MATCH;
-                break;
-            
-            case RobotState::CHECK_MATCH:
-                //Nick's section also - check if object matches what we need 
-                if(yoloObjectName==targetObject) //if there is a match go to placing object state
-                {
-                    RCLCPP_INFO(node->get_logger(), "Object Matches!");
-                    currentState=RobotState::PLACE_IN_BIN;
-                    // NOTE: boxCounter is incremented AFTER placement succeeds
-                    // (see PLACE_IN_BIN), so we do NOT increment it here.
-                }
-                else //otherwise move on to the next bin
-                {
-                    boxCounter++;
-                    currentState=RobotState::NAVIGATE_SCENE;
-                }
-                break;
-            
-            case RobotState::PLACE_IN_BIN: //this section to localize bin with AprilTag and then place object
-                //Ahmed's section as well
-                RCLCPP_INFO(node->get_logger(), "Placing object in bin");
-                //Add AprilTAG detection code and arm movement code to drop item
-                //once this is done set the below comment to true
-                //objectPlaced=true;
-                if (objectPlaced)//once its in the bin we continue to next box
-                {
-                    boxCounter++; // Bido: increment here, after successful placement
-                    currentState=RobotState::NAVIGATE_SCENE;
-                    break;
-                }
-                else
-                {
-                    //add some fallback code to try again
-                    break;
-                }
             
             case RobotState::RETURN_HOME:
                 // ---------------------------------------------------------------
@@ -502,26 +354,8 @@ int main(int argc, char** argv) {
                 }
                 // ---------------------------------------------------------------
 
-                currentState = RobotState::WRITE_OUTPUTS;
+                currentState = RobotState::DONE;
                 break;
-
-            case RobotState::WRITE_OUTPUTS: //state to save txt file. Might move this cause if we don't finish it won't write the data
-                RCLCPP_INFO(node->get_logger(), "Writing output files...");
-                // Write txt file with manipulable object info and all scene objects + locations
-                {
-                    std::ofstream out("/home/nicolas-rebollo/YOLO Images/contest2_output.txt");
-                    if (!out.is_open()) {
-                        RCLCPP_ERROR(node->get_logger(), "Failed to open contest2_output.txt for writing");
-                    } else {
-                        out << "Pickup: " << manipulableObjectName << " (" << manipulableObjectConfidence << ")\n";
-                        out << "Scene Objects:\n";
-                        for (size_t i = 0; i < sceneDetections.size(); ++i) {
-                            const auto& d = sceneDetections[i];
-                            out << i << ": " << d.name << " (" << d.confidence << ") @ x="
-                                << d.x << " y=" << d.y << " phi=" << d.phi << "\n";
-                        }
-                    }
-                }
 
                 // Switch state to DONE
                 currentState = RobotState::DONE;
