@@ -14,8 +14,8 @@ ArmController::ArmController(std::shared_ptr<rclcpp::Node> node) : node_(node) {
 		// Set planning parameters for better motion planning
 		arm_group_->setPlanningTime(5.0);  // Allow up to 5 seconds for planning
 		arm_group_->setNumPlanningAttempts(10);  // Try multiple times to find a plan
-		arm_group_->setMaxVelocityScalingFactor(0.5);  // Limit velocity to 50% of max
-		arm_group_->setMaxAccelerationScalingFactor(0.5);  // Limit acceleration to 50% of max
+		arm_group_->setMaxVelocityScalingFactor(0.75);  // Limit velocity to 50% of max
+		arm_group_->setMaxAccelerationScalingFactor(0.75);  // Limit acceleration to 50% of max
 
 		gripper_group_->setPlanningTime(3.0);
 		gripper_group_->setNumPlanningAttempts(5);
