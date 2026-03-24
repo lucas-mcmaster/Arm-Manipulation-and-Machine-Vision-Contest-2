@@ -21,7 +21,7 @@ class YoloDetectorNode(Node):
         self.get_logger().info('YOLO model loaded')
         
         # Confidence threshold
-        self.confidence_threshold = 0.6
+        self.confidence_threshold = 0.2
 
         # Allowed classes for contest logic (only these are considered valid)
         self.allowed_classes = {

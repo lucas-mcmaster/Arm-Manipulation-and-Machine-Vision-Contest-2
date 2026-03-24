@@ -536,7 +536,7 @@ int main(int argc, char** argv) {
                         (yoloObjectName == "motorcycle") ||
                         (yoloObjectName == "potted plant");
 
-                    YoloDetection det{yoloObjectName, confidence, has_name && conf_ok && is_allowed};
+                    YoloDetection det{yoloObjectName, confidence, has_name && conf_ok && objects_allowed};
                     auto yolo_call_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - yolo_call_start).count();
 
