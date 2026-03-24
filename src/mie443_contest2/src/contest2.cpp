@@ -105,7 +105,7 @@ int main(int argc, char** argv) {
     
     AprilTagDetector tag_detector(node);
     std::vector<int> candidate_tags={0,1,2,3,4};
-    tag_detector.setReferenceFrame("oakd_rgb_camera_optical_frame");
+    // tag_detector.setReferenceFrame("oakd_rgb_camera_optical_frame");
 
     //FSM initialization
     RobotState currentState = RobotState::PLACE_IN_BIN;
@@ -605,7 +605,7 @@ int main(int argc, char** argv) {
                         "PLACE: Looking for AprilTag ID...");
 
                     // Step 1: Check AprilTag is visible (timeout 2 s)
-                    auto visible = tag_detector.getVisibleTags(candidate_tags, 2000);
+                    auto visible = tag_detector.getVisibleTags(candidate_tags);
                     if (visible.empty()) {
                         RCLCPP_WARN(node->get_logger(),
                             "PLACE: AprilTag not visible yet — retrying next loop");
@@ -615,7 +615,7 @@ int main(int argc, char** argv) {
                     // Step 2: Get bin pose from AprilTag (in base_link frame)
                     for (int tag_id : visible)
                     {
-                        auto bin_pose_opt = tag_detector.getTagPose(tag_id, 2000);
+                        auto bin_pose_opt = tag_detector.getTagPose(tag_id);
                         if (!bin_pose_opt.has_value()) {
                             RCLCPP_WARN(node->get_logger(),
                                 "PLACE: Could not get pose for tag %d — retrying", tag_id);
