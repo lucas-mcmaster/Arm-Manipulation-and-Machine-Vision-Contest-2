@@ -102,6 +102,8 @@ int main(int argc, char** argv) {
                 // Step 2: Open gripper before descending
                 if (!arm.openGripper()) {
                     RCLCPP_ERROR(node->get_logger(), "PICKUP: Failed to open gripper");
+                    pickAttempts++;
+                    break;
                 }
 
                 // Step 3: Descend straight down to object
@@ -110,34 +112,56 @@ int main(int argc, char** argv) {
                     0.002, -0.016, 0.076, 0.997))
                 {
                     RCLCPP_ERROR(node->get_logger(), "PICKUP: Grasp pose unreachable");
+                    pickAttempts++;
+                    break;
                 }
                 // Step 4: Close gripper to grip the object
                 else if (!arm.closeGripper()) {
                     RCLCPP_ERROR(node->get_logger(), "PICKUP: Failed to close gripper");
-                }
-
-                // Step 5: Move arm to hover position above object
-                else if (!arm.moveToCartesianPose(
-                    0.132, -0.017, 0.212,
-                    0.006, -0.113, 0.003, 0.994))
-                {
-                    RCLCPP_ERROR(node->get_logger(), "PICKUP: Pre-grasp hover unreachable — retrying");
                     pickAttempts++;
                     break;
                 }
 
-                // Step 6: Move arm to front
+                // Step 5: Lift arm above object
                 else if (!arm.moveToCartesianPose(
-                    0.016, -0.137, 0.215,
-                    -0.087, -0.089, -0.732, 0.670))
+                    0.132, -0.017, 0.212,
+                    0.006, -0.113, 0.003, 0.994))
                 {
-                    RCLCPP_WARN(node->get_logger(),
-                        "PICKUP: Front move failed — keeping object and ending pickup");
+                    RCLCPP_ERROR(node->get_logger(), "PICKUP: Post-grasp lift unreachable — retrying");
+                    pickAttempts++;
+                    break;
+                }
+
+                // Step 5b: Translate to front position (keep step 5 orientation)
+                else if (!arm.moveToCartesianPose(
+                    0.030, -0.136, 0.212,
+                    -0.083, -0.094, -0.689, 0.714))
+                {
+                    RCLCPP_WARN(node->get_logger(), "PICKUP: Step 5b translation failed — keeping object");
                     pickSuccess = true;
                     pickAttempts = 0;
                 }
-
-                if (!pickSuccess) {
+                // Step 6a: Translate to front position (keep step 5 orientation)
+                else if (!arm.moveToCartesianPose(
+                    0.045, -0.277, 0.038,
+                    0.097, 0.112, -0.683, 0.716))
+                {
+                    RCLCPP_WARN(node->get_logger(), "PICKUP: Step 6a translation failed — keeping object");
+                    pickSuccess = true;
+                    pickAttempts = 0;
+                }
+                
+                // Step 5b: Translate to front position (keep step 5 orientation)
+                else if (!arm.moveToCartesianPose(
+                    0.030, -0.136, 0.212,
+                    -0.083, -0.094, -0.689, 0.714))
+                {
+                    RCLCPP_WARN(node->get_logger(), "PICKUP: Step 5b translation failed — keeping object");
+                    pickSuccess = true;
+                    pickAttempts = 0;
+                }
+              
+                else {
                     pickSuccess = true;
                     pickAttempts = 0;
                 }
