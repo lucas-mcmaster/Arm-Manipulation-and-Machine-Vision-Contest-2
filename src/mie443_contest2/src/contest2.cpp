@@ -595,7 +595,6 @@ int main(int argc, char** argv) {
                 RCLCPP_INFO(node->get_logger(), "Placing object in bin");
 
                 // Ahmed's section — AprilTag localisation + arm place sequence
-                {
                     // The tag ID matches the original box index from coords.xml.
                     // boxCounter has NOT been incremented yet (that happens after success),
                     // so visitOrder[boxCounter] gives the correct current box index.
@@ -605,7 +604,7 @@ int main(int argc, char** argv) {
                         "PLACE: Looking for AprilTag ID...");
 
                     // Step 1: Check AprilTag is visible (timeout 2 s)
-                    auto visible = tag_detector.getVisibleTags(candidate_tags, 2000);
+                    auto visible = tag_detector.getVisibleTags(candidate_tags);
                     if (visible.empty()) {
                         RCLCPP_WARN(node->get_logger(),
                             "PLACE: AprilTag not visible yet — retrying next loop");
@@ -615,7 +614,7 @@ int main(int argc, char** argv) {
                     // Step 2: Get bin pose from AprilTag (in base_link frame)
                     for (int tag_id : visible)
                     {
-                        auto bin_pose_opt = tag_detector.getTagPose(tag_id, 2000);
+                        auto bin_pose_opt = tag_detector.getTagPose(tag_id);
                         if (!bin_pose_opt.has_value()) {
                             RCLCPP_WARN(node->get_logger(),
                                 "PLACE: Could not get pose for tag %d — retrying", tag_id);
@@ -631,7 +630,7 @@ int main(int argc, char** argv) {
                     
                         currentState=RobotState::DONE;
                     }
-                }
+                
 
                 //     // Step 3: Convert AprilTag pose (camera/base_link frame) → arm base frame.
                 //     //   Camera Z (depth forward) maps to arm X (reach forward).
