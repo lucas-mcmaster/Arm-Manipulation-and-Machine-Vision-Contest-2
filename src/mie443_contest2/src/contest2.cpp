@@ -595,7 +595,6 @@ int main(int argc, char** argv) {
                 RCLCPP_INFO(node->get_logger(), "Placing object in bin");
 
                 // Ahmed's section — AprilTag localisation + arm place sequence
-                {
                     // The tag ID matches the original box index from coords.xml.
                     // boxCounter has NOT been incremented yet (that happens after success),
                     // so visitOrder[boxCounter] gives the correct current box index.
@@ -631,7 +630,7 @@ int main(int argc, char** argv) {
                     
                         currentState=RobotState::DONE;
                     }
-                }
+                
 
                 //     // Step 3: Convert AprilTag pose (camera/base_link frame) → arm base frame.
                 //     //   Camera Z (depth forward) maps to arm X (reach forward).
