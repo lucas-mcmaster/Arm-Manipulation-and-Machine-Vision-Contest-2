@@ -100,12 +100,15 @@ int main(int argc, char** argv) {
 
     //initializing external classes from other files
     // Navigation nav(node); //these names can be changes as you'd like
-    YoloInterface yolo(node);
+    //YoloInterface yolo(node);
     // ArmController arm(node);
-    // AprilTagDetector tag_detector(node);
+    
+    AprilTagDetector tag_detector(node);
+    std::vector<int> candidate_tags={0,1,2,3,4};
+    tag_detector.setReferenceFrame("oakd_rgb_camera_optical_frame");
 
     //FSM initialization
-    RobotState currentState = RobotState::DETECT_SCENE_OBJECT;
+    RobotState currentState = RobotState::PLACE_IN_BIN;
 
     //Initializing necessary variables -- everyone feel free to add to this as needed
     // int boxCounter=0; //box counter to know when we have gone to each box 
@@ -299,34 +302,34 @@ int main(int argc, char** argv) {
     // -----------------------------------------------------------------------
 
     // YOLO cooldown (1s)
-    auto lastYoloTime = std::chrono::steady_clock::time_point::min();
+    // auto lastYoloTime = std::chrono::steady_clock::time_point::min();
 
-    // Helper for YOLO detection in FSM cases (Nick's sections)
-    auto runYoloDetection = [&](CameraSource camera, bool save_image) -> YoloDetection {
-        auto now = std::chrono::steady_clock::now();
-        if (now - lastYoloTime < std::chrono::seconds(1)) {
-            // RCLCPP_INFO(node->get_logger(), "YOLO: cooldown active, skipping detection");
-            return {"", -1.0f, false};
-        }
-        lastYoloTime = now;
+    // // Helper for YOLO detection in FSM cases (Nick's sections)
+    // auto runYoloDetection = [&](CameraSource camera, bool save_image) -> YoloDetection {
+    //     auto now = std::chrono::steady_clock::now();
+    //     if (now - lastYoloTime < std::chrono::seconds(1)) {
+    //         // RCLCPP_INFO(node->get_logger(), "YOLO: cooldown active, skipping detection");
+    //         return {"", -1.0f, false};
+    //     }
+    //     lastYoloTime = now;
 
-        // Save detection
-        std::string detected = yolo.getObjectName(camera, save_image);
+    //     // Save detection
+    //     std::string detected = yolo.getObjectName(camera, save_image);
 
-        // Get detection confidence
-        float confidence = yolo.getConfidence();
+    //     // Get detection confidence
+    //     float confidence = yolo.getConfidence();
 
-        // Warn about no valid detection or negative confidence
-        if (detected.empty() || confidence < 0.0f) {
-            RCLCPP_WARN(node->get_logger(), "YOLO: no valid detection");
-            return {"", -1.0f, false};
-        }
+    //     // Warn about no valid detection or negative confidence
+    //     if (detected.empty() || confidence < 0.0f) {
+    //         RCLCPP_WARN(node->get_logger(), "YOLO: no valid detection");
+    //         return {"", -1.0f, false};
+    //     }
 
-        // Store, print, and return detection
-        yoloConfidenceScore = confidence;
-        RCLCPP_INFO(node->get_logger(), "YOLO: %s (%.2f)", detected.c_str(), confidence);
-        return {detected, confidence, true};
-    };
+    //     // Store, print, and return detection
+    //     yoloConfidenceScore = confidence;
+    //     RCLCPP_INFO(node->get_logger(), "YOLO: %s (%.2f)", detected.c_str(), confidence);
+    //     return {detected, confidence, true};
+    // };
 
     while(rclcpp::ok() && !finished && secondsElapsed <= 300) {
         rclcpp::spin_some(node);
@@ -518,58 +521,58 @@ int main(int argc, char** argv) {
             //     // ---------------------------------------------------------------
             //     break;
 
-            case RobotState::DETECT_SCENE_OBJECT:
-                //Nick's section
-                RCLCPP_INFO(node->get_logger(), "DETECT_SCENE_OBJECT: calling YOLO");
-                {
-                    auto yolo_call_start = std::chrono::steady_clock::now();
-                    yoloObjectName = yolo.getObjectName(CameraSource::OAKD, true);
-                    float confidence = yolo.getConfidence();
-                    bool has_name = !yoloObjectName.empty();
-                    bool conf_ok = confidence >= 0.0f;
+            // case RobotState::DETECT_SCENE_OBJECT:
+            //     //Nick's section
+            //     RCLCPP_INFO(node->get_logger(), "DETECT_SCENE_OBJECT: calling YOLO");
+            //     {
+            //         auto yolo_call_start = std::chrono::steady_clock::now();
+            //         yoloObjectName = yolo.getObjectName(CameraSource::OAKD, true);
+            //         float confidence = yolo.getConfidence();
+            //         bool has_name = !yoloObjectName.empty();
+            //         bool conf_ok = confidence >= 0.0f;
 
-                    // List of allowed objects
-                    bool objects_allowed =
-                        (yoloObjectName == "mouse") ||
-                        (yoloObjectName == "cup") ||
-                        (yoloObjectName == "bottle") ||
-                        (yoloObjectName == "motorcycle") ||
-                        (yoloObjectName == "potted plant");
+            //         // List of allowed objects
+            //         bool objects_allowed =
+            //             (yoloObjectName == "mouse") ||
+            //             (yoloObjectName == "cup") ||
+            //             (yoloObjectName == "bottle") ||
+            //             (yoloObjectName == "motorcycle") ||
+            //             (yoloObjectName == "potted plant");
 
-                    YoloDetection det{yoloObjectName, confidence, has_name && conf_ok && objects_allowed};
-                    auto yolo_call_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - yolo_call_start).count();
+            //         YoloDetection det{yoloObjectName, confidence, has_name && conf_ok && objects_allowed};
+            //         auto yolo_call_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            //             std::chrono::steady_clock::now() - yolo_call_start).count();
 
-                    RCLCPP_INFO(node->get_logger(),
-                        "DETECT_SCENE_OBJECT: name='%s' confidence=%.3f valid=%d (call %lld ms)",
-                        yoloObjectName.c_str(), confidence, static_cast<int>(det.valid),
-                        static_cast<long long>(yolo_call_ms));
-                    if (!has_name) {
-                        RCLCPP_WARN(node->get_logger(),
-                            "DETECT_SCENE_OBJECT: invalid because name is empty");
-                    }
-                    if (!conf_ok) {
-                        RCLCPP_WARN(node->get_logger(),
-                            "DETECT_SCENE_OBJECT: invalid because confidence < 0 (%.3f)",
-                            confidence);
-                    }
-                    if (!det.valid) {
-                        break;
-                    }
+            //         RCLCPP_INFO(node->get_logger(),
+            //             "DETECT_SCENE_OBJECT: name='%s' confidence=%.3f valid=%d (call %lld ms)",
+            //             yoloObjectName.c_str(), confidence, static_cast<int>(det.valid),
+            //             static_cast<long long>(yolo_call_ms));
+            //         if (!has_name) {
+            //             RCLCPP_WARN(node->get_logger(),
+            //                 "DETECT_SCENE_OBJECT: invalid because name is empty");
+            //         }
+            //         if (!conf_ok) {
+            //             RCLCPP_WARN(node->get_logger(),
+            //                 "DETECT_SCENE_OBJECT: invalid because confidence < 0 (%.3f)",
+            //                 confidence);
+            //         }
+            //         if (!det.valid) {
+            //             break;
+            //         }
 
-                    // Store scene object in vector if space left
-                    yoloObjectName = det.name;
-                    yoloConfidenceScore = det.confidence;
-                    if (sceneDetections.empty()) {
-                        sceneDetections.push_back(det);
-                    }
-                }
+            //         // Store scene object in vector if space left
+            //         yoloObjectName = det.name;
+            //         yoloConfidenceScore = det.confidence;
+            //         if (sceneDetections.empty()) {
+            //             sceneDetections.push_back(det);
+            //         }
+            //     }
 
-                //Once a valid object is identified switch states to check match      
-                RCLCPP_INFO(node->get_logger(), "Object Identified");
-                RCLCPP_INFO(node->get_logger(), "DETECT_SCENE_OBJECT: transition -> WRITE_OUTPUTS");
-                currentState = RobotState::WRITE_OUTPUTS;
-                break;
+            //     //Once a valid object is identified switch states to check match      
+            //     RCLCPP_INFO(node->get_logger(), "Object Identified");
+            //     RCLCPP_INFO(node->get_logger(), "DETECT_SCENE_OBJECT: transition -> WRITE_OUTPUTS");
+            //     currentState = RobotState::WRITE_OUTPUTS;
+            //     break;
             
             // case RobotState::CHECK_MATCH:
             //     //Nick's section also - check if object matches what we need 
@@ -587,103 +590,109 @@ int main(int argc, char** argv) {
             //     }
             //     break;
             
-            // case RobotState::PLACE_IN_BIN: //this section to localize bin with AprilTag and then place object
-            //     //Ahmed's section as well
-            //     RCLCPP_INFO(node->get_logger(), "Placing object in bin");
+            case RobotState::PLACE_IN_BIN: //this section to localize bin with AprilTag and then place object
+                //Ahmed's section as well
+                RCLCPP_INFO(node->get_logger(), "Placing object in bin");
 
-            //     // Ahmed's section — AprilTag localisation + arm place sequence
-            //     {
-            //         // The tag ID matches the original box index from coords.xml.
-            //         // boxCounter has NOT been incremented yet (that happens after success),
-            //         // so visitOrder[boxCounter] gives the correct current box index.
-            //         int tag_id = visitOrder[boxCounter];
+                // Ahmed's section — AprilTag localisation + arm place sequence
+                {
+                    // The tag ID matches the original box index from coords.xml.
+                    // boxCounter has NOT been incremented yet (that happens after success),
+                    // so visitOrder[boxCounter] gives the correct current box index.
+                    // int tag_id = visitOrder[boxCounter];
 
-            //         RCLCPP_INFO(node->get_logger(),
-            //             "PLACE: Looking for AprilTag ID %d ...", tag_id);
+                    RCLCPP_INFO(node->get_logger(),
+                        "PLACE: Looking for AprilTag ID...");
 
-            //         // Step 1: Check AprilTag is visible (timeout 2 s)
-            //         std::vector<int> visible = tag_detector.getVisibleTags({tag_id}, 2000);
-            //         if (visible.empty()) {
-            //             RCLCPP_WARN(node->get_logger(),
-            //                 "PLACE: AprilTag %d not visible yet — retrying next loop", tag_id);
-            //             break; // stay in PLACE_IN_BIN, try again
-            //         }
+                    // Step 1: Check AprilTag is visible (timeout 2 s)
+                    auto visible = tag_detector.getVisibleTags(candidate_tags, 2000);
+                    if (visible.empty()) {
+                        RCLCPP_WARN(node->get_logger(),
+                            "PLACE: AprilTag not visible yet — retrying next loop");
+                        break; // stay in PLACE_IN_BIN, try again
+                    }
 
-            //         // Step 2: Get bin pose from AprilTag (in base_link frame)
-            //         auto bin_pose_opt = tag_detector.getTagPose(tag_id, 2000);
-            //         if (!bin_pose_opt.has_value()) {
-            //             RCLCPP_WARN(node->get_logger(),
-            //                 "PLACE: Could not get pose for tag %d — retrying", tag_id);
-            //             break;
-            //         }
-            //         geometry_msgs::msg::Pose bin_pose = bin_pose_opt.value();
+                    // Step 2: Get bin pose from AprilTag (in base_link frame)
+                    for (int tag_id : visible)
+                    {
+                        auto bin_pose_opt = tag_detector.getTagPose(tag_id, 2000);
+                        if (!bin_pose_opt.has_value()) {
+                            RCLCPP_WARN(node->get_logger(),
+                                "PLACE: Could not get pose for tag %d — retrying", tag_id);
+                            break;
+                        }
+                        geometry_msgs::msg::Pose bin_pose = bin_pose_opt.value();
 
-            //         RCLCPP_INFO(node->get_logger(),
-            //             "PLACE: Bin localised — camera frame (%.3f, %.3f, %.3f)",
-            //             bin_pose.position.x,
-            //             bin_pose.position.y,
-            //             bin_pose.position.z);
+                        RCLCPP_INFO(node->get_logger(),
+                            "PLACE: Bin localised — camera frame (%.3f, %.3f, %.3f)",
+                            bin_pose.position.x,
+                            bin_pose.position.y,
+                            bin_pose.position.z);
+                    
+                        currentState=RobotState::DONE;
+                    }
+                }
 
-            //         // Step 3: Convert AprilTag pose (camera/base_link frame) → arm base frame.
-            //         //   Camera Z (depth forward) maps to arm X (reach forward).
-            //         //   Camera X (lateral)       maps to arm -Y.
-            //         //   Bin top rim is ~5 cm above the tag centre height.
-            //         double bin_arm_x = bin_pose.position.z - 0.05;  // depth → arm forward, back off tag face
-            //         double bin_arm_y = -bin_pose.position.x;         // lateral flip
-            //         double bin_arm_z =  bin_pose.position.y + 0.05;  // bin top rim height
+                //     // Step 3: Convert AprilTag pose (camera/base_link frame) → arm base frame.
+                //     //   Camera Z (depth forward) maps to arm X (reach forward).
+                //     //   Camera X (lateral)       maps to arm -Y.
+                //     //   Bin top rim is ~5 cm above the tag centre height.
+                //     double bin_arm_x = bin_pose.position.z - 0.05;  // depth → arm forward, back off tag face
+                //     double bin_arm_y = -bin_pose.position.x;         // lateral flip
+                //     double bin_arm_z =  bin_pose.position.y + 0.05;  // bin top rim height
 
-            //         bool placeSuccess = false;
+                //     bool placeSuccess = false;
 
-            //         // Step 4: Pre-place hover — 10 cm above bin opening, gripper pointing down
-            //         if (!arm.moveToCartesianPose(
-            //             bin_arm_x, bin_arm_y, bin_arm_z + 0.10,
-            //             0.0, M_PI / 2.0, 0.0))
-            //         {
-            //             RCLCPP_ERROR(node->get_logger(), "PLACE: Pre-place hover unreachable — retrying");
-            //         }
-            //         // Step 5: Lower object into bin
-            //         else if (!arm.moveToCartesianPose(
-            //             bin_arm_x, bin_arm_y, bin_arm_z,
-            //             0.0, M_PI / 2.0, 0.0))
-            //         {
-            //             RCLCPP_ERROR(node->get_logger(), "PLACE: Could not lower into bin — retrying");
-            //         }
-            //         // Step 6: Open gripper to release object
-            //         else if (!arm.openGripper()) {
-            //             RCLCPP_ERROR(node->get_logger(), "PLACE: Gripper release failed — retrying");
-            //         }
-            //         else {
-            //             std::this_thread::sleep_for(std::chrono::milliseconds(400));
+                //     // Step 4: Pre-place hover — 10 cm above bin opening, gripper pointing down
+                //     if (!arm.moveToCartesianPose(
+                //         bin_arm_x, bin_arm_y, bin_arm_z + 0.10,
+                //         0.0, M_PI / 2.0, 0.0))
+                //     {
+                //         RCLCPP_ERROR(node->get_logger(), "PLACE: Pre-place hover unreachable — retrying");
+                //     }
+                //     // Step 5: Lower object into bin
+                //     else if (!arm.moveToCartesianPose(
+                //         bin_arm_x, bin_arm_y, bin_arm_z,
+                //         0.0, M_PI / 2.0, 0.0))
+                //     {
+                //         RCLCPP_ERROR(node->get_logger(), "PLACE: Could not lower into bin — retrying");
+                //     }
+                //     // Step 6: Open gripper to release object
+                //     else if (!arm.openGripper()) {
+                //         RCLCPP_ERROR(node->get_logger(), "PLACE: Gripper release failed — retrying");
+                //     }
+                //     else {
+                //         std::this_thread::sleep_for(std::chrono::milliseconds(400));
 
-            //             // Step 7: Retract arm up and clear of bin
-            //             arm.moveToCartesianPose(
-            //                 bin_arm_x, bin_arm_y, bin_arm_z + 0.15,
-            //                 0.0, M_PI / 2.0, 0.0);
+                //         // Step 7: Retract arm up and clear of bin
+                //         arm.moveToCartesianPose(
+                //             bin_arm_x, bin_arm_y, bin_arm_z + 0.15,
+                //             0.0, M_PI / 2.0, 0.0);
 
-            //             placeSuccess = true;
-            //         }
+                //         placeSuccess = true;
+                //     }
 
-            //         if (placeSuccess) {
-            //             objectPlaced = true;
-            //             objectInArm  = false;
-            //             RCLCPP_INFO(node->get_logger(), "PLACE: Object successfully placed in bin!");
-            //         } else {
-            //             break; // retry from top of PLACE_IN_BIN next loop
-            //         }
-            //     }
+                //     if (placeSuccess) {
+                //         objectPlaced = true;
+                //         objectInArm  = false;
+                //         RCLCPP_INFO(node->get_logger(), "PLACE: Object successfully placed in bin!");
+                //     } else {
+                //         break; // retry from top of PLACE_IN_BIN next loop
+                //     }
+                // }
 
-            //     //objectPlaced=true;
-            //     if (objectPlaced)//once its in the bin we continue to next box
-            //     {
-            //         boxCounter++; // Bido: increment here, after successful placement
-            //         currentState=RobotState::NAVIGATE_SCENE;
-            //         break;
-            //     }
-            //     else
-            //     {
-            //         //add some fallback code to try again
-            //         break;
-            //     }
+                // //objectPlaced=true;
+                // if (objectPlaced)//once its in the bin we continue to next box
+                // {
+                //     boxCounter++; // Bido: increment here, after successful placement
+                //     currentState=RobotState::NAVIGATE_SCENE;
+                //     break;
+                // }
+                // else
+                // {
+                //     //add some fallback code to try again
+                //     break;
+                // }
             
             // case RobotState::RETURN_HOME:
             //     // ---------------------------------------------------------------
@@ -712,27 +721,27 @@ int main(int argc, char** argv) {
             //     currentState = RobotState::WRITE_OUTPUTS;
             //     break;
 
-            case RobotState::WRITE_OUTPUTS: //state to save txt file. Might move this cause if we don't finish it won't write the data
-                RCLCPP_INFO(node->get_logger(), "Writing output files...");
-                // Write txt file with manipulable object info and all scene objects + locations
-                {
-                    std::ofstream out("/home/nicolas-rebollo/YOLO Images/contest2_output.txt");
-                    if (!out.is_open()) {
-                        RCLCPP_ERROR(node->get_logger(), "Failed to open contest2_output.txt for writing");
-                    } else {
-                        out << "Detected: " << yoloObjectName << " (" << yoloConfidenceScore << ")\n";
-                        out << "Scene Objects:\n";
-                        for (size_t i = 0; i < sceneDetections.size(); ++i) {
-                            const auto& d = sceneDetections[i];
-                            out << i << ": " << d.name << " (" << d.confidence << ")\n";
-                        }
-                    }
-                }
+            // case RobotState::WRITE_OUTPUTS: //state to save txt file. Might move this cause if we don't finish it won't write the data
+            //     RCLCPP_INFO(node->get_logger(), "Writing output files...");
+            //     // Write txt file with manipulable object info and all scene objects + locations
+            //     {
+            //         std::ofstream out("/home/nicolas-rebollo/YOLO Images/contest2_output.txt");
+            //         if (!out.is_open()) {
+            //             RCLCPP_ERROR(node->get_logger(), "Failed to open contest2_output.txt for writing");
+            //         } else {
+            //             out << "Detected: " << yoloObjectName << " (" << yoloConfidenceScore << ")\n";
+            //             out << "Scene Objects:\n";
+            //             for (size_t i = 0; i < sceneDetections.size(); ++i) {
+            //                 const auto& d = sceneDetections[i];
+            //                 out << i << ": " << d.name << " (" << d.confidence << ")\n";
+            //             }
+            //         }
+            //     }
 
-                // Switch state to DONE
-                currentState = RobotState::DONE;
-                finished = true;
-                break;
+            //     // Switch state to DONE
+            //     currentState = RobotState::DONE;
+            //     finished = true;
+            //     break;
 
             case RobotState::DONE: //done state once we have completed contest in case there is still time remaining
                 // Idle state, do nothing until timer runs out
