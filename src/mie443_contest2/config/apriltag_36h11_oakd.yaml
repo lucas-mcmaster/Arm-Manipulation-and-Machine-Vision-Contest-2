@@ -1,0 +1,24 @@
+/**:
+  ros__parameters:
+    image_transport: raw
+    family: 36h11
+    # Set this to your printed tag edge length in meters.
+    # If your tags are 5 cm, use 0.05. If 3 cm, use 0.03.
+    size: 0.05
+    max_hamming: 0
+
+    pose_estimation_method: "pnp"
+
+    # Publish TF frames for these tag IDs
+    tag:
+      ids: [0, 1, 2, 3, 4]
+      frames: [tag0, tag1, tag2, tag3, tag4]
+      sizes: [0.05, 0.05, 0.05, 0.05, 0.05]
+
+    detector:
+      threads: 1
+      decimate: 2.0
+      blur: 0.0
+      refine: true
+      sharpening: 0.25
+      debug: false

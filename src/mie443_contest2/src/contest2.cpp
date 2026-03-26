@@ -103,9 +103,18 @@ int main(int argc, char** argv) {
     //YoloInterface yolo(node);
     // ArmController arm(node);
     
+    // AprilTag TF frames are published in the camera optical frame.
+    // By default we expect frame names like "tag0", "tag1", ... (configurable via params).
+    // std::string tag_frame_prefix = "tag";
+    // std::string tag_reference_frame = "oakd_rgb_camera_optical_frame";
+    // node->declare_parameter("apriltag_tag_frame_prefix", tag_frame_prefix);
+    // node->declare_parameter("apriltag_reference_frame", tag_reference_frame);
+    // node->get_parameter("apriltag_tag_frame_prefix", tag_frame_prefix);
+    // node->get_parameter("apriltag_reference_frame", tag_reference_frame);
+
     AprilTagDetector tag_detector(node);
     std::vector<int> candidate_tags={0,1,2,3,4};
-    // tag_detector.setReferenceFrame("oakd_rgb_camera_optical_frame");
+    tag_detector.setReferenceFrame("oakd_rgb_camera_optical_frame");
 
     //FSM initialization
     RobotState currentState = RobotState::PLACE_IN_BIN;
@@ -590,7 +599,7 @@ int main(int argc, char** argv) {
             //     }
             //     break;
             
-            case RobotState::PLACE_IN_BIN: //this section to localize bin with AprilTag and then place object
+            case RobotState::PLACE_IN_BIN: { //this section to localize bin with AprilTag and then place object
                 //Ahmed's section as well
                 RCLCPP_INFO(node->get_logger(), "Placing object in bin");
 
@@ -603,33 +612,22 @@ int main(int argc, char** argv) {
                     RCLCPP_INFO(node->get_logger(),
                         "PLACE: Looking for AprilTag ID...");
 
-                    // Step 1: Check AprilTag is visible (timeout 2 s)
-                    auto visible = tag_detector.getVisibleTags(candidate_tags);
-                    if (visible.empty()) {
-                        RCLCPP_WARN(node->get_logger(),
-                            "PLACE: AprilTag not visible yet — retrying next loop");
-                        break; // stay in PLACE_IN_BIN, try again
-                    }
-
-                    // Step 2: Get bin pose from AprilTag (in base_link frame)
-                    for (int tag_id : visible)
-                    {
-                        auto bin_pose_opt = tag_detector.getTagPose(tag_id);
-                        if (!bin_pose_opt.has_value()) {
-                            RCLCPP_WARN(node->get_logger(),
-                                "PLACE: Could not get pose for tag %d — retrying", tag_id);
-                            break;
+                    auto visible_tags = tag_detector.getVisibleTags(candidate_tags);
+                    if (!visible_tags.empty()) {
+                        for (int tag_id : visible_tags) {
+                            auto pose = tag_detector.getTagPose(tag_id);
+                            if (pose.has_value()) {
+                                RCLCPP_INFO(node->get_logger(),
+                                    "%s -> tag%d: pos(%.3f, %.3f, %.3f) ori(%.3f, %.3f, %.3f, %.3f)",
+                                    tag_detector.getReferenceFrame().c_str(), tag_id,
+                                    pose->position.x, pose->position.y, pose->position.z,
+                                    pose->orientation.x, pose->orientation.y, pose->orientation.z, pose->orientation.w);
+                            }
                         }
-                        geometry_msgs::msg::Pose bin_pose = bin_pose_opt.value();
-
-                        RCLCPP_INFO(node->get_logger(),
-                            "PLACE: Bin localised — camera frame (%.3f, %.3f, %.3f)",
-                            bin_pose.position.x,
-                            bin_pose.position.y,
-                            bin_pose.position.z);
-                    
-                        currentState=RobotState::DONE;
+                    } else {
+                        RCLCPP_INFO(node->get_logger(), "No tags visible");
                     }
+                    RCLCPP_INFO(node->get_logger(), "---------------------------------");
                 
 
                 //     // Step 3: Convert AprilTag pose (camera/base_link frame) → arm base frame.
@@ -687,6 +685,8 @@ int main(int argc, char** argv) {
                 //     currentState=RobotState::NAVIGATE_SCENE;
                 //     break;
                 // }
+                break;
+            }
                 // else
                 // {
                 //     //add some fallback code to try again
