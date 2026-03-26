@@ -25,7 +25,7 @@ const double OBJ_ARM_Y = 0.003;
 const double OBJ_ARM_Z = 0.192;
 
 // AprilTag ID of the bin to place into
-const int TEST_TAG_ID = 0;
+// const int TEST_TAG_ID = 0;
 
 int main(int argc, char** argv) {
     // Setup ROS 2
@@ -61,12 +61,16 @@ int main(int argc, char** argv) {
     // Initialize arm and tag detector
     ArmController arm(node);
     AprilTagDetector tag_detector(node);
+    std::vector<int> candidate_tags={0,1,2,3,4};
+    tag_detector.setReferenceFrame("arm_mount");
 
     // Arm state variables
     bool objectInArm  = false;
     bool objectPlaced = false;
-    int  pickAttempts = 0;
-    const int MAX_PICK_ATTEMPTS = 3;
+    int  pickAttempts  = 0;
+    int  placeAttempts = 0;
+    const int MAX_PICK_ATTEMPTS  = 3;
+    const int MAX_PLACE_ATTEMPTS = 3;
 
     // Start directly in PICKUP_OBJECT
     RobotState currentState = RobotState::PICKUP_OBJECT;
@@ -151,12 +155,12 @@ int main(int argc, char** argv) {
                     pickAttempts = 0;
                 }
                 
-                // Step 5b: Translate to front position (keep step 5 orientation)
+                // Step 7: Go back inside to clear workspace for next steps
                 else if (!arm.moveToCartesianPose(
                     0.030, -0.136, 0.212,
                     -0.083, -0.094, -0.689, 0.714))
                 {
-                    RCLCPP_WARN(node->get_logger(), "PICKUP: Step 5b translation failed — keeping object");
+                    RCLCPP_WARN(node->get_logger(), "PICKUP: Step 7 translation back into robot failed — keeping object");
                     pickSuccess = true;
                     pickAttempts = 0;
                 }
@@ -169,7 +173,7 @@ int main(int argc, char** argv) {
                 if (pickSuccess) {
                     objectInArm = true;
                     RCLCPP_INFO(node->get_logger(), "PICKUP: Object successfully picked up!");
-                    currentState = RobotState::DONE;
+                    currentState = RobotState::PLACE_IN_BIN;
                 } else {
                     pickAttempts++;
                     RCLCPP_WARN(node->get_logger(),
@@ -179,7 +183,7 @@ int main(int argc, char** argv) {
                             "PICKUP: Max attempts reached — aborting.");
                         pickAttempts = 0;
                         objectInArm = false;
-                        currentState = RobotState::DONE;
+                        currentState = RobotState::PLACE_IN_BIN;
                     }
                 }
 
@@ -189,80 +193,111 @@ int main(int argc, char** argv) {
             case RobotState::PLACE_IN_BIN:
                 RCLCPP_INFO(node->get_logger(), "Placing object in bin");
                 {
-                    int tag_id = TEST_TAG_ID;
-
-                    RCLCPP_INFO(node->get_logger(),
-                        "PLACE: Looking for AprilTag ID %d ...", tag_id);
-
-                    // Step 1: Check AprilTag is visible (timeout 2 s)
-                    std::vector<int> visible = tag_detector.getVisibleTags({tag_id}, 2000);
-                    if (visible.empty()) {
-                        RCLCPP_WARN(node->get_logger(),
-                            "PLACE: AprilTag %d not visible yet — retrying next loop", tag_id);
+                    if (placeAttempts >= MAX_PLACE_ATTEMPTS) {
+                        RCLCPP_ERROR(node->get_logger(),
+                            "PLACE: Max attempts reached — aborting.");
+                        placeAttempts = 0;
+                        currentState = RobotState::DONE;
                         break;
                     }
 
-                    // Step 2: Get bin pose from AprilTag (in base_link frame)
-                    auto bin_pose_opt = tag_detector.getTagPose(tag_id, 2000);
-                    if (!bin_pose_opt.has_value()) {
+                    RCLCPP_INFO(node->get_logger(),
+                        "PLACE: Looking for AprilTag ID...");
+
+                    auto visible_tags = tag_detector.getVisibleTags(candidate_tags);
+                    std::optional<geometry_msgs::msg::Pose> selected_pose;
+                    int selected_tag_id = -1;
+                    if (!visible_tags.empty()) {
+                        for (int tag_id : visible_tags) {
+                            auto bin_pose = tag_detector.getTagPose(tag_id);
+                            if (bin_pose.has_value()) {
+                                RCLCPP_INFO(node->get_logger(),
+                                    "%s -> tag%d: pos(%.3f, %.3f, %.3f) ori(%.3f, %.3f, %.3f, %.3f)",
+                                    tag_detector.getReferenceFrame().c_str(), tag_id,
+                                    bin_pose->position.x, bin_pose->position.y, bin_pose->position.z,
+                                    bin_pose->orientation.x, bin_pose->orientation.y, bin_pose->orientation.z, bin_pose->orientation.w);
+                                selected_pose = bin_pose;
+                                selected_tag_id = tag_id;
+                                break; // use the first valid tag pose
+                            }
+                        }
+                    } else {
+                        RCLCPP_INFO(node->get_logger(), "No tags visible");
+                    }
+                    RCLCPP_INFO(node->get_logger(), "---------------------------------");
+                    if (!selected_pose.has_value()) {
                         RCLCPP_WARN(node->get_logger(),
-                            "PLACE: Could not get pose for tag %d — retrying", tag_id);
+                            "PLACE: No valid tag pose available — retrying.");
                         break;
                     }
-                    geometry_msgs::msg::Pose bin_pose = bin_pose_opt.value();
 
-                    RCLCPP_INFO(node->get_logger(),
-                        "PLACE: Bin localised — camera frame (%.3f, %.3f, %.3f)",
-                        bin_pose.position.x,
-                        bin_pose.position.y,
-                        bin_pose.position.z);
+                    // Step 3: AprilTag pose is already in the arm reference frame.
+                    // Use it directly (optionally offset Z to target bin rim height).
+                    const auto& bin_pose = selected_pose.value();
+                    double bin_arm_x = bin_pose.position.x;
+                    double bin_arm_y = bin_pose.position.y;
+                    double bin_arm_z = bin_pose.position.z; // + 0.05
 
-                    // Step 3: Convert AprilTag pose (camera/base_link frame) → arm base frame.
-                    //   Camera Z (depth forward) maps to arm X (reach forward).
-                    //   Camera X (lateral)       maps to arm -Y.
-                    //   Bin top rim is ~5 cm above the tag centre height.
-                    double bin_arm_x = bin_pose.position.z - 0.05;
-                    double bin_arm_y = -bin_pose.position.x;
-                    double bin_arm_z =  bin_pose.position.y + 0.05;
 
                     bool placeSuccess = false;
 
-                    // Step 4: Pre-place hover — 10 cm above bin opening, gripper pointing down
+                    // Step 4: Pre-place hover — 10 cm above bin opening
                     if (!arm.moveToCartesianPose(
-                        bin_arm_x, bin_arm_y, bin_arm_z + 0.10,
-                        0.0, M_PI / 2.0, 0.0))
+                        bin_arm_x, bin_arm_y, bin_arm_z + 0.2,
+                        bin_pose.orientation.x, bin_pose.orientation.y, bin_pose.orientation.z, bin_pose.orientation.w))
                     {
-                        RCLCPP_ERROR(node->get_logger(), "PLACE: Pre-place hover unreachable — retrying");
+                        RCLCPP_ERROR(node->get_logger(), "PLACE: Step 4 pre-place hover failed");
+                        placeAttempts++;
+                        break;
                     }
                     // Step 5: Lower object into bin
                     else if (!arm.moveToCartesianPose(
                         bin_arm_x, bin_arm_y, bin_arm_z,
-                        0.0, M_PI / 2.0, 0.0))
+                        -0.014, 0.297, -1.526))
                     {
-                        RCLCPP_ERROR(node->get_logger(), "PLACE: Could not lower into bin — retrying");
+                        RCLCPP_ERROR(node->get_logger(), "PLACE: Step 5 lower into bin failed");
+                        placeAttempts++;
+                        break;
                     }
                     // Step 6: Open gripper to release object
                     else if (!arm.openGripper()) {
-                        RCLCPP_ERROR(node->get_logger(), "PLACE: Gripper release failed — retrying");
+                        RCLCPP_ERROR(node->get_logger(), "PLACE: Step 6 gripper release failed");
+                        placeAttempts++;
+                        break;
                     }
                     else {
+                        // Wait for object to drop before moving
                         std::this_thread::sleep_for(std::chrono::milliseconds(400));
 
-                        // Step 7: Retract arm up and clear of bin
-                        arm.moveToCartesianPose(
-                            bin_arm_x, bin_arm_y, bin_arm_z + 0.15,
-                            0.0, M_PI / 2.0, 0.0);
-
-                        placeSuccess = true;
+                        // Step 7: Return to pre-place hover height
+                        if (!arm.moveToCartesianPose(
+                            bin_arm_x, bin_arm_y, bin_arm_z + 0.10,
+                            -0.014, 0.297, -1.526))
+                        {
+                            RCLCPP_ERROR(node->get_logger(), "PLACE: Step 7 retract up failed");
+                            placeAttempts++;
+                            break;
+                        }
+                        // Step 8: Retract arm back inside robot
+                        else if (!arm.moveToCartesianPose(
+                            0.030, -0.136, 0.212,
+                            -0.083, -0.094, -0.689, 0.714))
+                        {
+                            RCLCPP_ERROR(node->get_logger(), "PLACE: Step 8 retract inside failed");
+                            placeAttempts++;
+                            break;
+                        }
+                        else {
+                            placeSuccess = true;
+                        }
                     }
 
                     if (placeSuccess) {
                         objectPlaced = true;
                         objectInArm  = false;
+                        placeAttempts = 0;
                         RCLCPP_INFO(node->get_logger(), "PLACE: Object successfully placed in bin!");
                         currentState = RobotState::DONE;
-                    } else {
-                        break; // retry from top of PLACE_IN_BIN next loop
                     }
                 }
                 break;
