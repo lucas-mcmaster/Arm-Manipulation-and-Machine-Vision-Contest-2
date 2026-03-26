@@ -5,7 +5,7 @@
 
 bool Boxes::load_coords() {
     std::string filePath = ament_index_cpp::get_package_share_directory("mie443_contest2") +
-                           std::string("/boxes_database/coords.xml");
+                           std::string("/boxes_database/cords.xml");
     cv::FileStorage fs(filePath, cv::FileStorage::READ);
     if(fs.isOpened()) {
         cv::FileNode node;

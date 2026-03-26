@@ -406,88 +406,141 @@ int main(int argc, char** argv) {
                 }
                 break;
             
-            case RobotState::PLACE_IN_BIN: {
-                if (placeAttempts >= MAX_PLACE_ATTEMPTS) {
-                    RCLCPP_ERROR(node->get_logger(), "PLACE: Max attempts reached — moving to next box.");
-                    placeAttempts = 0;
-                    boxCounter++;
-                    currentState = RobotState::NAVIGATE_SCENE;
-                    break;
-                }
+            case RobotState::PLACE_IN_BIN:
+                RCLCPP_INFO(node->get_logger(), "Placing object in bin");
+                {
+                    if (placeAttempts >= MAX_PLACE_ATTEMPTS) {
+                        RCLCPP_ERROR(node->get_logger(),
+                            "PLACE: Max attempts reached — aborting.");
+                        placeAttempts = 0;
+                        currentState = RobotState::DONE;
+                        break;
+                    }
 
-                RCLCPP_INFO(node->get_logger(), "PLACE: Looking for AprilTag ID...");
-                auto visible_tags = tag_detector.getVisibleTags(candidate_tags);
-                std::optional<geometry_msgs::msg::Pose> selected_pose;
-                
-                if (!visible_tags.empty()) {
-                    for (int tag_id : visible_tags) {
-                        auto bin_pose = tag_detector.getTagPose(tag_id);
-                        if (bin_pose.has_value()) {
-                            selected_pose = bin_pose;
-                            break;
+                    RCLCPP_INFO(node->get_logger(),
+                        "PLACE: Looking for AprilTag ID...");
+
+                    auto visible_tags = tag_detector.getVisibleTags(candidate_tags);
+                    std::optional<geometry_msgs::msg::Pose> selected_pose;
+                    int selected_tag_id = -1;
+                    if (!visible_tags.empty()) {
+                        for (int tag_id : visible_tags) {
+                            auto bin_pose = tag_detector.getTagPose(tag_id);
+                            if (bin_pose.has_value()) {
+                                RCLCPP_INFO(node->get_logger(),
+                                    "%s -> tag%d: pos(%.3f, %.3f, %.3f) ori(%.3f, %.3f, %.3f, %.3f)",
+                                    tag_detector.getReferenceFrame().c_str(), tag_id,
+                                    bin_pose->position.x, bin_pose->position.y, bin_pose->position.z,
+                                    bin_pose->orientation.x, bin_pose->orientation.y, bin_pose->orientation.z, bin_pose->orientation.w);
+                                selected_pose = bin_pose;
+                                selected_tag_id = tag_id;
+                                break; // use the first valid tag pose
+                            }
                         }
+                    } else {
+                        RCLCPP_INFO(node->get_logger(), "No tags visible");
                     }
-                }
-
-                if (!selected_pose.has_value()) {
-                    RCLCPP_WARN(node->get_logger(), "PLACE: No valid tag pose available — retrying.");
-                    placeAttempts++;
-                    break;
-                }
-
-                const auto& bin_pose = selected_pose.value();
-                double bin_arm_x = bin_pose.position.x;
-                double bin_arm_y = bin_pose.position.y;
-                double bin_arm_z = bin_pose.position.z; 
-
-                bool placeSuccess = false;
-
-                // Step 4: Pre-place hover
-                if (!arm.moveToCartesianPose(bin_arm_x, bin_arm_y, bin_arm_z + 0.2, 
-                    bin_pose.orientation.x, bin_pose.orientation.y, bin_pose.orientation.z, bin_pose.orientation.w)) {
-                    RCLCPP_ERROR(node->get_logger(), "PLACE: Step 4 hover failed");
-                    placeAttempts++; break;
-                }
-                // Step 5: Lower object into bin
-                else if (!arm.moveToCartesianPose(bin_arm_x, bin_arm_y, bin_arm_z, -0.014, 0.297, -1.526)) {
-                    RCLCPP_ERROR(node->get_logger(), "PLACE: Step 5 lower into bin failed");
-                    placeAttempts++; break;
-                }
-                // Step 6: Open gripper
-                else if (!arm.openGripper()) {
-                    RCLCPP_ERROR(node->get_logger(), "PLACE: Step 6 gripper release failed");
-                    placeAttempts++; break;
-                }
-                else {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(400));
-
-                    // Step 7: Return to pre-place hover
-                    if (!arm.moveToCartesianPose(bin_arm_x, bin_arm_y, bin_arm_z + 0.10, -0.014, 0.297, -1.526)) {
-                        RCLCPP_ERROR(node->get_logger(), "PLACE: Step 7 retract up failed");
-                        placeAttempts++; break;
+                    RCLCPP_INFO(node->get_logger(), "---------------------------------");
+                    if (!selected_pose.has_value()) {
+                        RCLCPP_WARN(node->get_logger(),
+                            "PLACE: No valid tag pose available — retrying.");
+                        break;
                     }
-                    // Step 8: Retract arm inside
-                    else if (!arm.moveToCartesianPose(0.030, -0.136, 0.212, -0.083, -0.094, -0.689, 0.714)) {
-                        RCLCPP_ERROR(node->get_logger(), "PLACE: Step 8 retract inside failed");
-                        placeAttempts++; break;
+
+                    // Step 3: Transform AprilTag pose from Oak-D frame to arm_mount frame.
+                    const auto& bin_pose = selected_pose.value();
+
+                    geometry_msgs::msg::TransformStamped oakd_to_arm;
+                    oakd_to_arm.header.frame_id = "oakd_rgb_camera_optical_frame";
+                    oakd_to_arm.child_frame_id = "arm_mount";
+                    oakd_to_arm.transform.translation.x = 0.0;
+                    oakd_to_arm.transform.translation.y = 0.018;
+                    oakd_to_arm.transform.translation.z = 0.066;
+                    oakd_to_arm.transform.rotation.x = 0.5;
+                    oakd_to_arm.transform.rotation.y = -0.5;
+                    oakd_to_arm.transform.rotation.z = 0.5;
+                    oakd_to_arm.transform.rotation.w = 0.5;
+
+                    geometry_msgs::msg::PoseStamped pose_in;
+                    pose_in.header.frame_id = "oakd_rgb_camera_optical_frame";
+                    pose_in.pose = bin_pose;
+
+                    geometry_msgs::msg::PoseStamped pose_out;
+                    tf2::doTransform(pose_in, pose_out, oakd_to_arm);
+
+                    double bin_arm_x = pose_out.pose.position.x;
+                    double bin_arm_y = pose_out.pose.position.y;
+                    double bin_arm_z = pose_out.pose.position.z + 0.05;
+
+
+                    bool placeSuccess = false;
+
+                    // Step 4: Pre-place hover — 10 cm above bin opening
+                    // if (!arm.moveToCartesianPose(
+                    //     0.043, -0.301, 0.155,
+                    //     -0.053, -0.060, -0.697, 0.713))
+                    if (!arm.moveToCartesianPose(
+                        0.024, -0.192, 0.301,
+                        -0.432, -0.467, -0.555, 0.535))
+                    {
+                        RCLCPP_ERROR(node->get_logger(), "PLACE: Step 4 pre-place hover failed");
+                        placeAttempts++;
+                        break;
+                    }
+                    // // Step 5: Lower object into bin
+                    // else if (!arm.moveToCartesianPose(
+                    //     0.049, -0.288, 0.173,
+                    //     -0.014, 0.297, -1.526))
+                    // {
+                    //     RCLCPP_ERROR(node->get_logger(), "PLACE: Step 5 lower into bin failed");
+                    //     placeAttempts++;
+                    //     break;
+                    // }
+                    // Step 6: Open gripper to release object
+                    else if (!arm.openGripper()) {
+                        RCLCPP_ERROR(node->get_logger(), "PLACE: Step 6 gripper release failed");
+                        placeAttempts++;
+                        break;
                     }
                     else {
-                        placeSuccess = true;
+                        // Wait for object to drop before moving
+                        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+
+                        // // Step 7: Return to pre-place hover height
+                        // if (!arm.moveToCartesianPose(
+                        //     bin_arm_x, bin_arm_y, bin_arm_z + 0.10,
+                        //     -0.014, 0.297, -1.526))
+                        // {
+                        //     RCLCPP_ERROR(node->get_logger(), "PLACE: Step 7 retract up failed");
+                        //     placeAttempts++;
+                        //     break;
+                        // }
+                        // Step 8: Retract arm back inside robot
+                        // if (!arm.moveToCartesianPose(
+                        //     0.030, -0.136, 0.212,
+                        //     -0.053, -0.060, -0.697, 0.713))
+                        if (!arm.moveToCartesianPose(
+                            0.030, -0.136, 0.212,
+                            -0.083, -0.094, -0.689, 0.714))
+                        {
+                            RCLCPP_ERROR(node->get_logger(), "PLACE: Step 8 retract inside failed");
+                            placeAttempts++;
+                            break;
+                        }
+                        else {
+                            placeSuccess = true;
+                        }
+                    }
+
+                    if (placeSuccess) {
+                        objectPlaced = true;
+                        objectInArm  = false;
+                        placeAttempts = 0;
+                        RCLCPP_INFO(node->get_logger(), "PLACE: Object successfully placed in bin!");
+                        currentState = RobotState::NAVIGATE_SCENE;
                     }
                 }
-
-                if (placeSuccess) {
-                    objectPlaced = true;
-                    objectInArm = false;
-                    placeAttempts = 0;
-                    RCLCPP_INFO(node->get_logger(), "PLACE: Object successfully placed in bin!");
-                    
-                    // We successfully placed it, move on to map remaining items!
-                    boxCounter++; 
-                    currentState = RobotState::NAVIGATE_SCENE;
-                }
                 break;
-            }
             
             case RobotState::RETURN_HOME:
                 RCLCPP_INFO(node->get_logger(), "[RETURN_HOME] Navigating back to start: x=%.2f, y=%.2f, phi=%.2f", initial_x, initial_y, initial_phi);
