@@ -10,6 +10,7 @@
 #include <cmath>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
 
 // ── Arm-only FSM states ───────────────────────────────────────────────────────
 enum class RobotState {
@@ -62,7 +63,7 @@ int main(int argc, char** argv) {
     ArmController arm(node);
     AprilTagDetector tag_detector(node);
     std::vector<int> candidate_tags={0,1,2,3,4};
-    tag_detector.setReferenceFrame("arm_mount");
+    tag_detector.setReferenceFrame("oakd_rgb_camera_optical_frame");
 
     // Arm state variables
     bool objectInArm  = false;
@@ -231,34 +232,55 @@ int main(int argc, char** argv) {
                         break;
                     }
 
-                    // Step 3: AprilTag pose is already in the arm reference frame.
-                    // Use it directly (optionally offset Z to target bin rim height).
+                    // Step 3: Transform AprilTag pose from Oak-D frame to arm_mount frame.
                     const auto& bin_pose = selected_pose.value();
-                    double bin_arm_x = bin_pose.position.x;
-                    double bin_arm_y = bin_pose.position.y;
-                    double bin_arm_z = bin_pose.position.z; // + 0.05
+
+                    geometry_msgs::msg::TransformStamped oakd_to_arm;
+                    oakd_to_arm.header.frame_id = "oakd_rgb_camera_optical_frame";
+                    oakd_to_arm.child_frame_id = "arm_mount";
+                    oakd_to_arm.transform.translation.x = 0.0;
+                    oakd_to_arm.transform.translation.y = 0.018;
+                    oakd_to_arm.transform.translation.z = 0.066;
+                    oakd_to_arm.transform.rotation.x = 0.5;
+                    oakd_to_arm.transform.rotation.y = -0.5;
+                    oakd_to_arm.transform.rotation.z = 0.5;
+                    oakd_to_arm.transform.rotation.w = 0.5;
+
+                    geometry_msgs::msg::PoseStamped pose_in;
+                    pose_in.header.frame_id = "oakd_rgb_camera_optical_frame";
+                    pose_in.pose = bin_pose;
+
+                    geometry_msgs::msg::PoseStamped pose_out;
+                    tf2::doTransform(pose_in, pose_out, oakd_to_arm);
+
+                    double bin_arm_x = pose_out.pose.position.x;
+                    double bin_arm_y = pose_out.pose.position.y;
+                    double bin_arm_z = pose_out.pose.position.z + 0.05;
 
 
                     bool placeSuccess = false;
 
                     // Step 4: Pre-place hover — 10 cm above bin opening
+                    // if (!arm.moveToCartesianPose(
+                    //     0.043, -0.301, 0.155,
+                    //     -0.053, -0.060, -0.697, 0.713))
                     if (!arm.moveToCartesianPose(
-                        bin_arm_x, bin_arm_y, bin_arm_z + 0.2,
-                        bin_pose.orientation.x, bin_pose.orientation.y, bin_pose.orientation.z, bin_pose.orientation.w))
+                        0.024, -0.192, 0.301,
+                        -0.432, -0.467, -0.555, 0.535))
                     {
                         RCLCPP_ERROR(node->get_logger(), "PLACE: Step 4 pre-place hover failed");
                         placeAttempts++;
                         break;
                     }
-                    // Step 5: Lower object into bin
-                    else if (!arm.moveToCartesianPose(
-                        bin_arm_x, bin_arm_y, bin_arm_z,
-                        -0.014, 0.297, -1.526))
-                    {
-                        RCLCPP_ERROR(node->get_logger(), "PLACE: Step 5 lower into bin failed");
-                        placeAttempts++;
-                        break;
-                    }
+                    // // Step 5: Lower object into bin
+                    // else if (!arm.moveToCartesianPose(
+                    //     0.049, -0.288, 0.173,
+                    //     -0.014, 0.297, -1.526))
+                    // {
+                    //     RCLCPP_ERROR(node->get_logger(), "PLACE: Step 5 lower into bin failed");
+                    //     placeAttempts++;
+                    //     break;
+                    // }
                     // Step 6: Open gripper to release object
                     else if (!arm.openGripper()) {
                         RCLCPP_ERROR(node->get_logger(), "PLACE: Step 6 gripper release failed");
@@ -269,16 +291,19 @@ int main(int argc, char** argv) {
                         // Wait for object to drop before moving
                         std::this_thread::sleep_for(std::chrono::milliseconds(400));
 
-                        // Step 7: Return to pre-place hover height
-                        if (!arm.moveToCartesianPose(
-                            bin_arm_x, bin_arm_y, bin_arm_z + 0.10,
-                            -0.014, 0.297, -1.526))
-                        {
-                            RCLCPP_ERROR(node->get_logger(), "PLACE: Step 7 retract up failed");
-                            placeAttempts++;
-                            break;
-                        }
+                        // // Step 7: Return to pre-place hover height
+                        // if (!arm.moveToCartesianPose(
+                        //     bin_arm_x, bin_arm_y, bin_arm_z + 0.10,
+                        //     -0.014, 0.297, -1.526))
+                        // {
+                        //     RCLCPP_ERROR(node->get_logger(), "PLACE: Step 7 retract up failed");
+                        //     placeAttempts++;
+                        //     break;
+                        // }
                         // Step 8: Retract arm back inside robot
+                        // if (!arm.moveToCartesianPose(
+                        //     0.030, -0.136, 0.212,
+                        //     -0.053, -0.060, -0.697, 0.713))
                         else if (!arm.moveToCartesianPose(
                             0.030, -0.136, 0.212,
                             -0.083, -0.094, -0.689, 0.714))

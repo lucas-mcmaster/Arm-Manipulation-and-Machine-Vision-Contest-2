@@ -22,6 +22,7 @@ public:
 
 	bool closeGripper();
 
+
 private:
 	std::shared_ptr<rclcpp::Node> node_;
 	std::shared_ptr<moveit::planning_interface::MoveGroupInterface> arm_group_;
