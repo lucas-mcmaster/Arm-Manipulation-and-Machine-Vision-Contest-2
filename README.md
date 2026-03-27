@@ -41,6 +41,14 @@ ssh ubuntu@100.69.127.75
 ros2 run mie443_contest2 image_capture_server
 ```
 
+7. Start AprilTag Server
+```cpp
+ssh ubuntu@100.69.127.75
+```
+```cpp
+ros2 launch apriltag_ros camera_36h11.launch.yml
+```
+
 7. Launch YOLO Detector (on laptop terminal)
 ```cpp
 source ~/contest2/bin/activate
