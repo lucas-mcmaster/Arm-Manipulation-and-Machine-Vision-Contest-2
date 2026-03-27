@@ -1,5 +1,6 @@
 #include "mie443_contest2/arm_controller.h"
 #include "mie443_contest2/apriltag_detector.h"
+#include "mie443_contest2/navigation.h"
 #include <rclcpp/rclcpp.hpp>
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <chrono>
@@ -60,6 +61,7 @@ int main(int argc, char** argv) {
     RCLCPP_INFO(node->get_logger(), "Arm isolated test node started");
 
     // Initialize arm and tag detector
+    Navigation nav(node);
     ArmController arm(node);
     AprilTagDetector tag_detector(node);
     std::vector<int> candidate_tags={0,1,2,3,4};
@@ -244,51 +246,55 @@ int main(int argc, char** argv) {
                     // Inverse:  t = [-0.066, 0.0, 0.018]
                     //           q(xyzw) = [-0.500, 0.500, -0.500, 0.500]
 
-                    const auto& bin_pose = selected_pose.value();
+                    // const auto& bin_pose = selected_pose.value();
 
-                    RCLCPP_INFO(node->get_logger(),
-                        "DEBUG [oakd frame] tag%d: pos(%.4f, %.4f, %.4f)",
-                        selected_tag_id,
-                        bin_pose.position.x, bin_pose.position.y, bin_pose.position.z);
+                    // RCLCPP_INFO(node->get_logger(),
+                    //     "DEBUG [oakd frame] tag%d: pos(%.4f, %.4f, %.4f)",
+                    //     selected_tag_id,
+                    //     bin_pose.position.x, bin_pose.position.y, bin_pose.position.z);
 
-                    geometry_msgs::msg::TransformStamped oakd_to_arm;
-                    oakd_to_arm.header.frame_id = "arm_mount";                        // target
-                    oakd_to_arm.child_frame_id  = "oakd_rgb_camera_optical_frame";    // source
-                    oakd_to_arm.transform.translation.x =  -0.066;
-                    oakd_to_arm.transform.translation.y =   0.0;
-                    oakd_to_arm.transform.translation.z =   0.018;
-                    oakd_to_arm.transform.rotation.x    =  -0.5;
-                    oakd_to_arm.transform.rotation.y    =   0.5;
-                    oakd_to_arm.transform.rotation.z    =  -0.5;
-                    oakd_to_arm.transform.rotation.w    =   0.5;
+                    // geometry_msgs::msg::TransformStamped oakd_to_arm;
+                    // oakd_to_arm.header.frame_id = "arm_mount";                        // target
+                    // oakd_to_arm.child_frame_id  = "oakd_rgb_camera_optical_frame";    // source
+                    // oakd_to_arm.transform.translation.x =  -0.066;
+                    // oakd_to_arm.transform.translation.y =   0.0;
+                    // oakd_to_arm.transform.translation.z =   0.018;
+                    // oakd_to_arm.transform.rotation.x    =  -0.5;
+                    // oakd_to_arm.transform.rotation.y    =   0.5;
+                    // oakd_to_arm.transform.rotation.z    =  -0.5;
+                    // oakd_to_arm.transform.rotation.w    =   0.5;
 
-                    geometry_msgs::msg::PoseStamped pose_in;
-                    pose_in.header.frame_id = "oakd_rgb_camera_optical_frame";
-                    pose_in.pose = bin_pose;
+                    // geometry_msgs::msg::PoseStamped pose_in;
+                    // pose_in.header.frame_id = "oakd_rgb_camera_optical_frame";
+                    // pose_in.pose = bin_pose;
 
-                    geometry_msgs::msg::PoseStamped pose_out;
-                    tf2::doTransform(pose_in, pose_out, oakd_to_arm);
+                    // geometry_msgs::msg::PoseStamped pose_out;
+                    // tf2::doTransform(pose_in, pose_out, oakd_to_arm);
 
-                    double bin_arm_x = pose_out.pose.position.x;
-                    double bin_arm_y = pose_out.pose.position.y;
-                    double bin_arm_z = pose_out.pose.position.z + 0.05;
+                    // double bin_arm_x = pose_out.pose.position.x;
+                    // double bin_arm_y = pose_out.pose.position.y;
+                    // double bin_arm_z = pose_out.pose.position.z + 0.05;
 
-                    RCLCPP_INFO(node->get_logger(),
-                        "DEBUG [arm_mount frame] tag%d: pos(%.4f, %.4f, %.4f) (z includes +0.05 offset)",
-                        selected_tag_id, bin_arm_x, bin_arm_y, bin_arm_z);
+                    // RCLCPP_INFO(node->get_logger(),
+                    //     "DEBUG [arm_mount frame] tag%d: pos(%.4f, %.4f, %.4f) (z includes +0.05 offset)",
+                    //     selected_tag_id, bin_arm_x, bin_arm_y, bin_arm_z);
 
 
                     bool placeSuccess = false;
 
-                    // Step 4: Pre-place hover — 10 cm above bin opening
+                    // Move forward 20cm towards april tag
+                    // nav.moveToGoal(goal_x, goal_y, goal_phi)
+
+                    // Hard-coded move forward gripper to prepare drop off
                     if (!arm.moveToCartesianPose(
-                        bin_arm_x, bin_arm_y, bin_arm_z + 0.2,
-                        -0.014, 0.297, -1.526))
+                        0.024, -0.192, 0.301,
+                        -0.432, -0.467, -0.555,0.535))
                     {
-                        RCLCPP_ERROR(node->get_logger(), "PLACE: Step 4 pre-place hover failed");
+                        RCLCPP_ERROR(node->get_logger(), "PLACE: Step 3 pre-place hover failed");
                         placeAttempts++;
                         break;
                     }
+                    // Open gripper
                     else if (!arm.openGripper()) {
                         RCLCPP_ERROR(node->get_logger(), "PLACE: Step 6 gripper release failed");
                         placeAttempts++;
@@ -297,7 +303,7 @@ int main(int argc, char** argv) {
                     else {
                         // Wait for object to drop before moving
                         std::this_thread::sleep_for(std::chrono::milliseconds(400));
-                        
+
                         // Step 8: Retract arm back inside robot
                         if (!arm.moveToCartesianPose(
                             0.030, -0.136, 0.212,
