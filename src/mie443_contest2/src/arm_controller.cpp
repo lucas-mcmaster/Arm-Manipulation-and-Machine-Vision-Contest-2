@@ -129,6 +129,6 @@ bool ArmController::openGripper() {
 
 bool ArmController::closeGripper() {
 	RCLCPP_INFO(node_->get_logger(), "Closing gripper...");
-	return moveGripper(0.0);  // Closed position
+	return moveGripper(-0.5);  // Closed position
 }
 

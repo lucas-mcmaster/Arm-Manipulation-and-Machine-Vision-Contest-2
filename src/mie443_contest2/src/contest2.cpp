@@ -296,18 +296,32 @@ int main(int argc, char** argv) {
                     // Arm is now holding object in front of the OAK-D camera
                     RCLCPP_INFO(node->get_logger(), "PICKUP: Arm in position, running YOLO OAK-D detection...");
                     std::this_thread::sleep_for(std::chrono::milliseconds(1000)); // Allow camera feed to settle
-                    
-                    manipulableObjectName = yolo.getObjectName(CameraSource::OAKD, true);
-                    manipulableObjectConfidence = yolo.getConfidence();
-                    
-                    if (manipulableObjectName.empty() || manipulableObjectConfidence < 0.0f) {
-                        RCLCPP_WARN(node->get_logger(), "PICKUP: OAK-D failed to detect object. Will retry loop.");
-                        pickAttempts++; break;
+
+                    const auto yoloStart = std::chrono::steady_clock::now();
+                    const auto yoloTimeout = std::chrono::seconds(10);
+                    const auto yoloInterval = std::chrono::milliseconds(200);
+                    bool yoloSuccess = false;
+
+                    while (rclcpp::ok() && std::chrono::steady_clock::now() - yoloStart < yoloTimeout) {
+                        rclcpp::spin_some(node);
+                        manipulableObjectName = yolo.getObjectName(CameraSource::OAKD, true);
+                        manipulableObjectConfidence = yolo.getConfidence();
+
+                        if (!manipulableObjectName.empty() && manipulableObjectConfidence >= 0.0f) {
+                            yoloSuccess = true;
+                            break;
+                        }
+                        std::this_thread::sleep_for(yoloInterval);
                     }
 
-                    targetObject = manipulableObjectName;
-                    RCLCPP_INFO(node->get_logger(), "PICKUP: Successfully Latched Target -> '%s' (%.2f)", 
-                                targetObject.c_str(), manipulableObjectConfidence);
+                    if (yoloSuccess) {
+                        targetObject = manipulableObjectName;
+                        RCLCPP_INFO(node->get_logger(), "PICKUP: Successfully Latched Target -> '%s' (%.2f)", 
+                                    targetObject.c_str(), manipulableObjectConfidence);
+                    } else {
+                        targetObject = "cup";
+                        RCLCPP_WARN(node->get_logger(), "PICKUP: OAK-D failed to detect object after 10s. Defaulting targetObject to 'cup'.");
+                    }
 
                     // Step 7: Go back inside to clear workspace for navigation
                     if (!arm.moveToCartesianPose(0.030, -0.136, 0.212, -0.083, -0.094, -0.689, 0.714)) {
@@ -362,35 +376,47 @@ int main(int argc, char** argv) {
 
             case RobotState::DETECT_SCENE_OBJECT: {
                 RCLCPP_INFO(node->get_logger(), "DETECT_SCENE_OBJECT: calling YOLO");
-                
-                yoloObjectName = yolo.getObjectName(CameraSource::OAKD, true);
-                float confidence = yolo.getConfidence();
-                
-                // Use "clock" instead of "mouse" as requested
-                bool objects_allowed = (yoloObjectName == "clock") || (yoloObjectName == "cup") || 
-                                       (yoloObjectName == "bottle") || (yoloObjectName == "motorcycle") || 
-                                       (yoloObjectName == "potted plant");
 
-                if (!yoloObjectName.empty() && confidence >= 0.0f && objects_allowed) {
+                const auto yoloStart = std::chrono::steady_clock::now();
+                const auto yoloTimeout = std::chrono::seconds(10);
+                const auto yoloInterval = std::chrono::milliseconds(200);
+                bool yoloSuccess = false;
+                float confidence = 0.0f;
+
+                while (rclcpp::ok() && std::chrono::steady_clock::now() - yoloStart < yoloTimeout) {
+                    rclcpp::spin_some(node);
+                    yoloObjectName = yolo.getObjectName(CameraSource::OAKD, true);
+                    confidence = yolo.getConfidence();
+
+                    // Use "clock" instead of "mouse" as requested
+                    bool objects_allowed = (yoloObjectName == "clock") || (yoloObjectName == "cup") ||
+                                           (yoloObjectName == "bottle") || (yoloObjectName == "motorcycle") ||
+                                           (yoloObjectName == "potted plant");
+
+                    if (!yoloObjectName.empty() && confidence >= 0.0f && objects_allowed) {
+                        yoloSuccess = true;
+                        break;
+                    }
+                    std::this_thread::sleep_for(yoloInterval);
+                }
+
+                if (yoloSuccess) {
                     int targetIdx = visitOrder[boxCounter];
                     sceneDetections.push_back({
-                        yoloObjectName, confidence, 
-                        static_cast<float>(boxes.coords[targetIdx][0]), 
-                        static_cast<float>(boxes.coords[targetIdx][1]), 
+                        yoloObjectName, confidence,
+                        static_cast<float>(boxes.coords[targetIdx][0]),
+                        static_cast<float>(boxes.coords[targetIdx][1]),
                         static_cast<float>(boxes.coords[targetIdx][2]), true
                     });
-                    
+
                     sceneDetectAttempts = 0;
                     RCLCPP_INFO(node->get_logger(), "Object Identified: %s", yoloObjectName.c_str());
                     currentState = RobotState::CHECK_MATCH;
                 } else {
-                    sceneDetectAttempts++;
-                    if (sceneDetectAttempts >= 5) {
-                        RCLCPP_WARN(node->get_logger(), "Scene detection failed after %d attempts; skipping box.", sceneDetectAttempts);
-                        sceneDetectAttempts = 0;
-                        boxCounter++;
-                        currentState = RobotState::NAVIGATE_SCENE;
-                    }
+                    sceneDetectAttempts = 0;
+                    RCLCPP_WARN(node->get_logger(), "Scene detection failed after 10s; skipping box.");
+                    boxCounter++;
+                    currentState = RobotState::NAVIGATE_SCENE;
                 }
                 break;
             }
