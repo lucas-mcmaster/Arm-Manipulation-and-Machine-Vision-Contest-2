@@ -44,7 +44,7 @@ ssh ubuntu@100.69.127.75
 source contest2/bin/activate
 ```
 ```cpp
-ros2 launch lerobot_moveit so101_turtlebot.launch.py
+ros2 launch lerobot_moveit so101_turtlebot.launch.py camera_index:=0
 ```
 
 5. Start MoveIt2 on Laptop (on laptop terminal)
