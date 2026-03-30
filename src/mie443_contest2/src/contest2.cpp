@@ -95,15 +95,15 @@ int main(int argc, char** argv) {
                     i, boxes.coords[i][0], boxes.coords[i][1], boxes.coords[i][2]);
     }
 
-    // Contest countdown timer
-    auto start = std::chrono::system_clock::now();
-    uint64_t secondsElapsed = 0;
-    RCLCPP_INFO(node->get_logger(), "Starting contest - 300 seconds timer begins now!");
-
-    // Initialize external classes
+    // Initialize external classes (before timer — each constructor can block for several seconds)
     Navigation nav(node);
     YoloInterface yolo(node);
     ArmController arm(node);
+
+    // Contest countdown timer starts after all components are ready
+    auto start = std::chrono::system_clock::now();
+    uint64_t secondsElapsed = 0;
+    RCLCPP_INFO(node->get_logger(), "Starting contest - 300 seconds timer begins now!");
     
     // AprilTagDetector tag_detector(node);
     // tag_detector.setReferenceFrame("oakd_rgb_camera_optical_frame");
@@ -287,11 +287,13 @@ int main(int argc, char** argv) {
                     RCLCPP_WARN(node->get_logger(), "PICKUP: Step 5b translation failed");
                     pickAttempts++; break;
                 }
-                // Step 6a: Translate to front position in front of OAK-D camera
-                else if (!arm.moveToCartesianPose(0.045, -0.277, 0.038, 0.097, 0.112, -0.683, 0.716)) {
+
+                // Step 7: rotate gripper back for better view
+                else if (!arm.moveToCartesianPose(0.034, -0.324, 0.050, -0.135, -0.149, -0.696, 0.690)) {
                     RCLCPP_WARN(node->get_logger(), "PICKUP: Step 6a translation failed");
                     pickAttempts++; break;
                 }
+
                 else {
                     // Arm is now holding object in front of the OAK-D camera
                     RCLCPP_INFO(node->get_logger(), "PICKUP: Arm in position, running YOLO OAK-D detection...");
@@ -307,7 +309,12 @@ int main(int argc, char** argv) {
                         manipulableObjectName = yolo.getObjectName(CameraSource::OAKD, true);
                         manipulableObjectConfidence = yolo.getConfidence();
 
-                        if (!manipulableObjectName.empty() && manipulableObjectConfidence >= 0.0f) {
+                        // Use "clock" instead of "mouse" as requested
+                        bool objects_allowed = (manipulableObjectName == "clock") || (manipulableObjectName == "cup") ||
+                                               (manipulableObjectName == "bottle") || (manipulableObjectName == "motorcycle") ||
+                                               (manipulableObjectName == "potted plant");
+
+                        if (!manipulableObjectName.empty() && manipulableObjectConfidence >= 0.0f && objects_allowed) {
                             yoloSuccess = true;
                             break;
                         }
@@ -385,7 +392,7 @@ int main(int argc, char** argv) {
 
                 while (rclcpp::ok() && std::chrono::steady_clock::now() - yoloStart < yoloTimeout) {
                     rclcpp::spin_some(node);
-                    yoloObjectName = yolo.getObjectName(CameraSource::OAKD, true);
+                    yoloObjectName = yolo.getObjectName(CameraSource::OAKD, false);
                     confidence = yolo.getConfidence();
 
                     // Use "clock" instead of "mouse" as requested
@@ -439,6 +446,7 @@ int main(int argc, char** argv) {
                         RCLCPP_ERROR(node->get_logger(),
                             "PLACE: Max attempts reached — aborting.");
                         placeAttempts = 0;
+                        boxCounter++;  // don't re-visit the same box
                         currentState = RobotState::NAVIGATE_SCENE;
                         break;
                     }
@@ -453,15 +461,16 @@ int main(int argc, char** argv) {
                     goal_phi += M_PI;
                     goal_phi = atan2(sin(goal_phi), cos(goal_phi));
 
-                    RCLCPP_INFO(node->get_logger(), "[NAVIGATE_SCENE] Moving to box %d (visit %d/%zu)", targetIdx, boxCounter + 1, visitOrder.size());
+                    RCLCPP_INFO(node->get_logger(), "[PLACE_IN_BIN] Moving closer to box %d (visit %d/%zu)", targetIdx, boxCounter + 1, visitOrder.size());
 
                     bool navSuccess = nav.moveToGoal(goal_x, goal_y, goal_phi);
 
                     if (navSuccess) {
-                        RCLCPP_INFO(node->get_logger(), "[NAVIGATE_SCENE] Box %d reached.", targetIdx);
+                        RCLCPP_INFO(node->get_logger(), "[PLACE_IN_BIN] Box %d reached.", targetIdx);
                     } else {
-                        RCLCPP_WARN(node->get_logger(), "[NAVIGATE_SCENE] Failed to reach box %d. Skipping.", targetIdx);
-                        boxCounter++;
+                        RCLCPP_WARN(node->get_logger(), "[PLACE_IN_BIN] Failed to reach box %d. Skipping.", targetIdx);
+                        placeAttempts++;
+                        break;
                     }
 
                     // RCLCPP_INFO(node->get_logger(),
@@ -582,6 +591,7 @@ int main(int argc, char** argv) {
                         objectPlaced = true;
                         objectInArm  = false;
                         placeAttempts = 0;
+                        boxCounter++;  // advance past the bin we just placed in
                         RCLCPP_INFO(node->get_logger(), "PLACE: Object successfully placed in bin!");
                         currentState = RobotState::NAVIGATE_SCENE;
                     }

@@ -21,7 +21,7 @@ class YoloDetectorNode(Node):
         self.get_logger().info('YOLO model loaded')
         
         # Confidence threshold
-        self.confidence_threshold = 0.6
+        self.confidence_threshold = 0.2
         
         # Create service
         self.service = self.create_service(

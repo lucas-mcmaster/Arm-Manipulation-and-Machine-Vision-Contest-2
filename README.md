@@ -5,6 +5,20 @@
 ./contest2.sh
 ```
 
+## Debugging camera
+```cpp
+ros2 service call /oakd/stop_camera std_srvs/srv/Trigger {}
+```
+
+```cpp
+ros2 service call /oakd/start_camera std_srvs/srv/Trigger {}
+```
+
+## Switch camera ports for arm
+```cpp
+nano ros2_ws/src/mie443_contest2/mie443_contest2/lerobot_moveit/launch/so101_turtlebot.launch.py
+```
+
 ## Proper Command Order for Contest 2 (8 terminals required)
 
 1. Launch AMCL (on laptop terminal)
