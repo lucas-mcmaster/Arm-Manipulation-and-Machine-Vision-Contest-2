@@ -28,7 +28,7 @@ ros2 launch turtlebot4_navigation localization.launch.py map:=/home/nicolas-rebo
 
 2. Initialize NAV2 (on laptop terminal)
 ```cpp
-ros2 launch turtlebot4_navigation nav2.launch.py
+ros2 launch turtlebot4_navigation nav2.launch.py use_sim_time:=false
 ```
 
 3. Start up RVIZ for nav2 (on laptop terminal)
