@@ -1,4 +1,4 @@
- lkn#include "mie443_contest2/boxes.h"
+#include "mie443_contest2/boxes.h"
 #include "mie443_contest2/navigation.h"
 #include "mie443_contest2/robot_pose.h"
 #include "mie443_contest2/yoloInterface.h"
@@ -372,11 +372,14 @@ int main(int argc, char** argv) {
                 // Returns true if the step eventually succeeds, false if all retries fail.
                 // This way, a failure at Step 5 only retries Step 5 — not the whole sequence.
                 // -----------------------------------------------------------------------
+                // AFTER
                 auto tryArmStep = [&](auto stepFn, const std::string& stepName) -> bool {
                     for (int attempt = 1; attempt <= MAX_PICK_ATTEMPTS; attempt++) {
                         RCLCPP_INFO(node->get_logger(),
                             "PICKUP | %-20s | Attempt %d / %d",
                             stepName.c_str(), attempt, MAX_PICK_ATTEMPTS);
+
+                        rclcpp::spin_some(node); // keep AMCL + other callbacks alive before each attempt
 
                         if (stepFn()) {
                             RCLCPP_INFO(node->get_logger(), "PICKUP | %-20s | Success", stepName.c_str());
@@ -385,7 +388,13 @@ int main(int argc, char** argv) {
 
                         RCLCPP_WARN(node->get_logger(),
                             "PICKUP | %-20s | Failed — waiting 500ms before retry...", stepName.c_str());
-                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+                        // Spin during the wait instead of sleeping blindly
+                        auto retryDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+                        while (std::chrono::steady_clock::now() < retryDeadline) {
+                            rclcpp::spin_some(node);
+                            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                        }
                     }
 
                     RCLCPP_ERROR(node->get_logger(),
