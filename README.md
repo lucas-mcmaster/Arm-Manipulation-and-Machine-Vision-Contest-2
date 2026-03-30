@@ -68,7 +68,7 @@ ssh ubuntu@100.69.127.75
 ros2 launch apriltag_ros camera_36h11.launch.yml
 ```
 
-7. Launch YOLO Detector (on laptop terminal)
+8. Launch YOLO Detector (on laptop terminal)
 ```cpp
 source ~/contest2/bin/activate
 ```
@@ -76,7 +76,7 @@ source ~/contest2/bin/activate
 ros2 run mie443_contest2 yolo_detector.py
 ```
 
-8. Launch Contest 2 Code (on laptop terminal)
+9. Launch Contest 2 Code (on laptop terminal)
 ```cpp
 ros2 run mie443_contest2 contest2
 ```
