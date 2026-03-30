@@ -366,87 +366,148 @@ int main(int argc, char** argv) {
                 break;
             
             case RobotState::PICKUP_OBJECT: {
-                // Nick + Ahmed's section
 
-                bool pickSuccess = false;
+                // -----------------------------------------------------------------------
+                // Helper: Retry a single arm step up to MAX_PICK_ATTEMPTS times.
+                // Returns true if the step eventually succeeds, false if all retries fail.
+                // This way, a failure at Step 5 only retries Step 5 — not the whole sequence.
+                // -----------------------------------------------------------------------
+                auto tryArmStep = [&](auto stepFn, const std::string& stepName) -> bool {
+                    for (int attempt = 1; attempt <= MAX_PICK_ATTEMPTS; attempt++) {
+                        RCLCPP_INFO(node->get_logger(),
+                            "PICKUP | %-20s | Attempt %d / %d",
+                            stepName.c_str(), attempt, MAX_PICK_ATTEMPTS);
 
-                // Step 1: Move arm to hover position above object FIRST (for wrist cam to see it clearly)
-                if (!arm.moveToCartesianPose(
-                    OBJ_ARM_X, OBJ_ARM_Y, OBJ_ARM_Z + 0.08,
-                    0.0, M_PI / 2.0, 0.0))
-                {
-                    RCLCPP_ERROR(node->get_logger(), "PICKUP: Pre-grasp hover unreachable — retrying");
-                    pickAttempts++;
-                    break;
-                }
+                        if (stepFn()) {
+                            RCLCPP_INFO(node->get_logger(), "PICKUP | %-20s | Success", stepName.c_str());
+                            return true;
+                        }
 
-                // Step 2: Take YOLO picture from wrist camera now that arm is positioned above object
-                if (!manipulableObjectLatched) {
-                    YoloDetection det = runYoloDetection(CameraSource::WRIST, true);
-                    if (!det.valid) {
-                        // Try again next loop — arm stays at hover position
-                        break;
-                    }
-
-                    // Latch first valid detection
-                    manipulableObjectName = det.name;
-                    manipulableObjectConfidence = det.confidence;
-                    manipulableObjectLatched = true;
-                    targetObject = manipulableObjectName;
-
-                    RCLCPP_INFO(node->get_logger(),
-                        "PICKUP: Detected '%s' (%.2f) — proceeding to grasp",
-                        manipulableObjectName.c_str(), manipulableObjectConfidence);
-                }
-
-                // Step 3: Open gripper before descending
-                if (!arm.openGripper()) {
-                    RCLCPP_ERROR(node->get_logger(), "PICKUP: Failed to open gripper");
-                }
-                // Step 4: Descend straight down to object
-                else if (!arm.moveToCartesianPose(
-                    OBJ_ARM_X, OBJ_ARM_Y, OBJ_ARM_Z,
-                    0.0, M_PI / 2.0, 0.0))
-                {
-                    RCLCPP_ERROR(node->get_logger(), "PICKUP: Grasp pose unreachable");
-                }
-                // Step 5: Close gripper to grip the object
-                else if (!arm.closeGripper()) {
-                    RCLCPP_ERROR(node->get_logger(), "PICKUP: Failed to close gripper");
-                }
-                else {
-                    // Step 6: Brief pause to confirm grip is stable
-                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
-
-                    // Step 7: Lift to safe carry height (15 cm above object)
-                    if (!arm.moveToCartesianPose(
-                        OBJ_ARM_X, OBJ_ARM_Y, OBJ_ARM_Z + 0.15,
-                        0.0, M_PI / 2.0, 0.0))
-                    {
                         RCLCPP_WARN(node->get_logger(),
-                            "PICKUP: Lift step failed — object may still be gripped, continuing");
+                            "PICKUP | %-20s | Failed — waiting 500ms before retry...", stepName.c_str());
+                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
                     }
-                    pickSuccess = true;
-                    pickAttempts = 0;
+
+                    RCLCPP_ERROR(node->get_logger(),
+                        "PICKUP | %-20s | Exhausted all %d attempts. Aborting pickup sequence.",
+                        stepName.c_str(), MAX_PICK_ATTEMPTS);
+                    return false;
+                };
+
+                // -----------------------------------------------------------------------
+                // Pickup sequence — each step retries independently via tryArmStep.
+                // If any step exhausts its retries, pickupSucceeded stays false and we
+                // skip the remaining steps cleanly using the goto.
+                //
+                // Arm poses are (x, y, z, qx, qy, qz, qw) in the robot base frame.
+                // -----------------------------------------------------------------------
+                bool pickupSucceeded = false;
+
+                // Step 0: Move to a safe hover position to avoid knocking over any objects
+                if (!tryArmStep([&]{ return arm.moveToCartesianPose(
+                        0.024, -0.192, 0.301,
+                        -0.432, -0.467, -0.555, 0.535); }, "Step0-SafeHover"))
+                    goto pickup_done;
+
+                // Step 1: Move above the object in preparation for descent
+                if (!tryArmStep([&]{ return arm.moveToCartesianPose(
+                        0.131, -0.000, 0.201,
+                        -0.001,  0.004,  0.077, 0.997); }, "Step1-HoverAboveObj"))
+                    goto pickup_done;
+
+                // Step 2: Open gripper before descending so we don't push the object
+                if (!tryArmStep([&]{ return arm.openGripper(); }, "Step2-OpenGripper"))
+                    goto pickup_done;
+
+                // Step 3: Descend straight down to the grasp position
+                if (!tryArmStep([&]{ return arm.moveToCartesianPose(
+                        0.132,  0.000, 0.169,
+                        0.002, -0.016,  0.076, 0.997); }, "Step3-DescendToObj"))
+                    goto pickup_done;
+
+                // Step 4: Close gripper to secure the object
+                if (!tryArmStep([&]{ return arm.closeGripper(); }, "Step4-CloseGripper"))
+                    goto pickup_done;
+
+                // Step 5: Lift the object up to clear the surface
+                if (!tryArmStep([&]{ return arm.moveToCartesianPose(
+                        0.132, -0.017, 0.212,
+                        0.006, -0.113,  0.003, 0.994); }, "Step5-LiftObject"))
+                    goto pickup_done;
+
+                // Step 5b: Translate arm to a forward-facing carry position
+                if (!tryArmStep([&]{ return arm.moveToCartesianPose(
+                        0.030, -0.136, 0.212,
+                        -0.083, -0.094, -0.689, 0.714); }, "Step5b-TranslateForward"))
+                    goto pickup_done;
+
+                // Step 6: Bring the object in front of the OAK-D camera for identification
+                if (!tryArmStep([&]{ return arm.moveToCartesianPose(
+                        0.045, -0.277, 0.038,
+                        0.097,  0.112, -0.683, 0.716); }, "Step6-PresentToCamera"))
+                    goto pickup_done;
+
+                // -----------------------------------------------------------------------
+                // Object identification via YOLO — poll for up to 10 seconds.
+                // If detection times out, we default the target to "cup" and carry on
+                // rather than failing the whole pickup.
+                // -----------------------------------------------------------------------
+                {
+                    RCLCPP_INFO(node->get_logger(), "PICKUP | Waiting for camera feed to settle...");
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+
+                    RCLCPP_INFO(node->get_logger(), "PICKUP | Running YOLO identification (timeout: 10s)...");
+                    const auto yoloDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+                    bool yoloDetected = false;
+
+                    while (rclcpp::ok() && std::chrono::steady_clock::now() < yoloDeadline) {
+                        rclcpp::spin_some(node);
+                        manipulableObjectName   = yolo.getObjectName(CameraSource::OAKD, true);
+                        manipulableObjectConfidence = yolo.getConfidence();
+
+                        if (!manipulableObjectName.empty() && manipulableObjectConfidence >= 0.0f) {
+                            yoloDetected = true;
+                            break;
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                    }
+
+                    if (yoloDetected) {
+                        targetObject = manipulableObjectName;
+                        RCLCPP_INFO(node->get_logger(),
+                            "PICKUP | Object identified: '%s' (confidence: %.2f)",
+                            targetObject.c_str(), manipulableObjectConfidence);
+                    } else {
+                        targetObject = "cup";
+                        RCLCPP_WARN(node->get_logger(),
+                            "PICKUP | YOLO timed out — defaulting target to '%s'", targetObject.c_str());
+                    }
                 }
 
-                if (pickSuccess) {
+                // Step 7: Retract arm back inside the robot footprint before we navigate
+                if (!tryArmStep([&]{ return arm.moveToCartesianPose(
+                        0.030, -0.136, 0.212,
+                        -0.083, -0.094, -0.689, 0.714); }, "Step7-RetractArm"))
+                    goto pickup_done;
+
+                pickupSucceeded = true;
+
+                // -----------------------------------------------------------------------
+                // Cleanup and state transition
+                // -----------------------------------------------------------------------
+                pickup_done:
+                if (pickupSucceeded) {
                     objectInArm = true;
-                    RCLCPP_INFO(node->get_logger(), "PICKUP: Object successfully picked up!");
-                    currentState = RobotState::NAVIGATE_SCENE;
+                    RCLCPP_INFO(node->get_logger(),
+                        "PICKUP | Complete — holding '%s', proceeding to navigate.", targetObject.c_str());
                 } else {
-                    pickAttempts++;
-                    RCLCPP_WARN(node->get_logger(),
-                        "PICKUP: Attempt %d/%d failed.", pickAttempts, MAX_PICK_ATTEMPTS);
-                    if (pickAttempts >= MAX_PICK_ATTEMPTS) {
-                        RCLCPP_ERROR(node->get_logger(),
-                            "PICKUP: Max attempts reached — skipping pickup, continuing without object.");
-                        pickAttempts = 0;
-                        objectInArm = false;
-                        currentState = RobotState::NAVIGATE_SCENE;
-                    }
+                    objectInArm = false;
+                    RCLCPP_ERROR(node->get_logger(),
+                        "PICKUP | Sequence aborted — continuing navigation empty-handed.");
                 }
-            
+
+                pickAttempts = 0;
+                currentState = RobotState::NAVIGATE_SCENE;
                 break;
             }
                         
