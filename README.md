@@ -1,5 +1,10 @@
 # MIE443 - Contest2
 
+## Run Bash Script
+```cpp
+./contest2.sh
+```
+
 ## Proper Command Order for Contest 2 (8 terminals required)
 
 1. Launch AMCL (on laptop terminal)
