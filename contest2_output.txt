@@ -1,2 +1,2 @@
-Pickup: cup (0.413585)
+Pickup: cup (-1)
 Scene Objects:
