@@ -17,6 +17,7 @@
 #include <nav_msgs/msg/path.hpp>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+#include <geometry_msgs/msg/twist_stamped.hpp>
 
 // Struct for returned values from YOLO detection
 struct YoloDetection {
@@ -100,6 +101,39 @@ int main(int argc, char** argv) {
     YoloInterface yolo(node);
     ArmController arm(node);
 
+    // cmd_vel publisher for in-place rotation sweep during detection
+    auto cmd_vel_pub = node->create_publisher<geometry_msgs::msg::TwistStamped>("cmd_vel", 10);
+
+    // Helper: rotate in-place by a given angle (radians). Positive = CCW.
+    // Blocks until the rotation is approximately complete.
+    auto rotateInPlace = [&](double angle_rad, double angular_speed = 0.3) {
+        double duration_s = std::abs(angle_rad) / angular_speed;
+        double direction = (angle_rad >= 0.0) ? 1.0 : -1.0;
+
+        geometry_msgs::msg::TwistStamped twist;
+        twist.header.frame_id = "base_link";
+        twist.twist.angular.z = direction * angular_speed;
+
+        auto rotate_start = std::chrono::steady_clock::now();
+        while (rclcpp::ok()) {
+            auto elapsed = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - rotate_start).count();
+            if (elapsed >= duration_s) break;
+            twist.header.stamp = node->now();
+            cmd_vel_pub->publish(twist);
+            rclcpp::spin_some(node);
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+
+        // Stop
+        geometry_msgs::msg::TwistStamped stop;
+        stop.header.stamp = node->now();
+        stop.header.frame_id = "base_link";
+        cmd_vel_pub->publish(stop);
+        rclcpp::spin_some(node);
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    };
+
     // Contest countdown timer starts after all components are ready
     auto start = std::chrono::system_clock::now();
     uint64_t secondsElapsed = 0;
@@ -126,6 +160,7 @@ int main(int argc, char** argv) {
     int sceneDetectAttempts = 0;
     int pickAttempts = 0;
     int placeAttempts = 0;
+    bool forcedPlaceAttempted = false;
     const int MAX_PICK_ATTEMPTS = 3;
     const int MAX_PLACE_ATTEMPTS = 3;
 
@@ -136,7 +171,8 @@ int main(int argc, char** argv) {
     // Navigable-distance path planning setup
     // -----------------------------------------------------------------------
     using ComputePathToPose = nav2_msgs::action::ComputePathToPose;
-    auto path_planner_client = rclcpp_action::create_client<ComputePathToPose>(node, "compute_path_to_pose");
+    auto planner_node = std::make_shared<rclcpp::Node>("path_planner_helper");
+    auto path_planner_client = rclcpp_action::create_client<ComputePathToPose>(planner_node, "compute_path_to_pose");
 
     auto getNavigablePathLength = [&](double from_x, double from_y, double to_x, double to_y) -> double {
         if (!path_planner_client->wait_for_action_server(std::chrono::seconds(2))) {
@@ -159,7 +195,7 @@ int main(int argc, char** argv) {
         goal.goal.pose.orientation.w = 1.0;
 
         auto goal_handle_future = path_planner_client->async_send_goal(goal);
-        if (rclcpp::spin_until_future_complete(node, goal_handle_future, std::chrono::seconds(5)) != rclcpp::FutureReturnCode::SUCCESS) {
+        if (rclcpp::spin_until_future_complete(planner_node, goal_handle_future, std::chrono::seconds(5)) != rclcpp::FutureReturnCode::SUCCESS) {
             return std::sqrt(std::pow(to_x - from_x, 2) + std::pow(to_y - from_y, 2));
         }
 
@@ -169,7 +205,7 @@ int main(int argc, char** argv) {
         }
 
         auto result_future = path_planner_client->async_get_result(goal_handle);
-        if (rclcpp::spin_until_future_complete(node, result_future, std::chrono::seconds(10)) != rclcpp::FutureReturnCode::SUCCESS) {
+        if (rclcpp::spin_until_future_complete(planner_node, result_future, std::chrono::seconds(10)) != rclcpp::FutureReturnCode::SUCCESS) {
             return std::sqrt(std::pow(to_x - from_x, 2) + std::pow(to_y - from_y, 2));
         }
 
@@ -309,12 +345,7 @@ int main(int argc, char** argv) {
                         manipulableObjectName = yolo.getObjectName(CameraSource::OAKD, true);
                         manipulableObjectConfidence = yolo.getConfidence();
 
-                        // Use "clock" instead of "mouse" as requested
-                        bool objects_allowed = (manipulableObjectName == "clock") || (manipulableObjectName == "cup") ||
-                                               (manipulableObjectName == "bottle") || (manipulableObjectName == "motorcycle") ||
-                                               (manipulableObjectName == "potted plant");
-
-                        if (!manipulableObjectName.empty() && manipulableObjectConfidence >= 0.0f && objects_allowed) {
+                        if (manipulableObjectName == "cup" && manipulableObjectConfidence >= 0.0f) {
                             yoloSuccess = true;
                             break;
                         }
@@ -377,41 +408,102 @@ int main(int argc, char** argv) {
                         boxCounter++;
                     }
                 } else {
-                    currentState = RobotState::RETURN_HOME;
+                    if (!forcedPlaceAttempted && objectInArm && !objectPlaced && !visitOrder.empty()) {
+                        forcedPlaceAttempted = true;
+                        boxCounter = static_cast<int>(visitOrder.size()) - 1;
+                        RCLCPP_WARN(node->get_logger(), "[NAVIGATE_SCENE] No match found. Forcing PLACE_IN_BIN at last visited box.");
+                        currentState = RobotState::PLACE_IN_BIN;
+                    } else {
+                        currentState = RobotState::RETURN_HOME;
+                    }
                 }
                 break;
 
             case RobotState::DETECT_SCENE_OBJECT: {
-                RCLCPP_INFO(node->get_logger(), "DETECT_SCENE_OBJECT: calling YOLO");
+                RCLCPP_INFO(node->get_logger(), "DETECT_SCENE_OBJECT: starting sweep + YOLO");
 
-                const auto yoloStart = std::chrono::steady_clock::now();
-                const auto yoloTimeout = std::chrono::seconds(10);
-                const auto yoloInterval = std::chrono::milliseconds(200);
+                // ── Sweep parameters ──
+                const double SWEEP_STEP_DEG = 10.0;
+                const double SWEEP_MAX_DEG  = 30.0;
+                const double SWEEP_STEP_RAD = SWEEP_STEP_DEG * M_PI / 180.0;
+                const int    STEPS_PER_SIDE = static_cast<int>(SWEEP_MAX_DEG / SWEEP_STEP_DEG); // 4 steps
+                const int    YOLO_TRIES_PER_STEP = 10;  // ~2 seconds at each angle (10 x 200ms)
+
                 bool yoloSuccess = false;
                 float confidence = 0.0f;
+                double cumulativeRotation = 0.0; // track how far we've rotated from center
 
-                while (rclcpp::ok() && std::chrono::steady_clock::now() - yoloStart < yoloTimeout) {
-                    rclcpp::spin_some(node);
-                    yoloObjectName = yolo.getObjectName(CameraSource::OAKD, false);
-                    confidence = yolo.getConfidence();
+                // Lambda: try YOLO detection multiple times at current angle
+                auto tryYoloAtCurrentAngle = [&]() -> bool {
+                    for (int t = 0; t < YOLO_TRIES_PER_STEP; ++t) {
+                        rclcpp::spin_some(node);
+                        yoloObjectName = yolo.getObjectName(CameraSource::OAKD, true);
+                        confidence = yolo.getConfidence();
 
-                    if (yoloObjectName == "refrigerator") {
-                        yoloObjectName = "cup";
+                        if (yoloObjectName == "refrigerator") {
+                            yoloObjectName = "cup";
+                        }
+
+                        bool objects_allowed = (yoloObjectName == "clock") || (yoloObjectName == "cup") ||
+                                               (yoloObjectName == "bottle") || (yoloObjectName == "motorcycle") ||
+                                               (yoloObjectName == "potted plant");
+
+                        if (!yoloObjectName.empty() && confidence >= 0.0f && objects_allowed) {
+                            return true;
+                        }
+                        std::this_thread::sleep_for(std::chrono::milliseconds(200));
                     }
+                    return false;
+                };
 
-                    // Use "clock" instead of "mouse" as requested
-                    bool objects_allowed = (yoloObjectName == "clock") || (yoloObjectName == "cup") ||
-                                           (yoloObjectName == "bottle") || (yoloObjectName == "motorcycle") ||
-                                           (yoloObjectName == "potted plant");
-
-                    if (!yoloObjectName.empty() && confidence >= 0.0f && objects_allowed) {
-                        yoloSuccess = true;
-                        break;
-                    }
-                    std::this_thread::sleep_for(yoloInterval);
+                // ── Phase 0: Try YOLO at the current heading first ──
+                RCLCPP_INFO(node->get_logger(), "[SWEEP] Phase 0: trying at current heading");
+                if (tryYoloAtCurrentAngle()) {
+                    yoloSuccess = true;
                 }
 
+                // ── Phase 1: Sweep LEFT (positive / CCW) up to +20 deg ──
+                if (!yoloSuccess) {
+                    for (int step = 1; step <= STEPS_PER_SIDE && !yoloSuccess; ++step) {
+                        RCLCPP_INFO(node->get_logger(), "[SWEEP] Phase 1: rotating +%d deg (step %d/%d)",
+                                    static_cast<int>(step * SWEEP_STEP_DEG), step, STEPS_PER_SIDE);
+                        rotateInPlace(SWEEP_STEP_RAD);
+                        cumulativeRotation += SWEEP_STEP_RAD;
+
+                        if (tryYoloAtCurrentAngle()) {
+                            yoloSuccess = true;
+                        }
+                    }
+                }
+
+                // ── Phase 2: Return to center ──
+                if (!yoloSuccess) {
+                    RCLCPP_INFO(node->get_logger(), "[SWEEP] Phase 2: returning to center (%.1f deg back)",
+                                cumulativeRotation * 180.0 / M_PI);
+                    rotateInPlace(-cumulativeRotation);
+                    cumulativeRotation = 0.0;
+                }
+
+                // ── Phase 3: Sweep RIGHT (negative / CW) up to -20 deg ──
+                if (!yoloSuccess) {
+                    for (int step = 1; step <= STEPS_PER_SIDE && !yoloSuccess; ++step) {
+                        RCLCPP_INFO(node->get_logger(), "[SWEEP] Phase 3: rotating -%d deg (step %d/%d)",
+                                    static_cast<int>(step * SWEEP_STEP_DEG), step, STEPS_PER_SIDE);
+                        rotateInPlace(-SWEEP_STEP_RAD);
+                        cumulativeRotation -= SWEEP_STEP_RAD;
+
+                        if (tryYoloAtCurrentAngle()) {
+                            yoloSuccess = true;
+                        }
+                    }
+                }
+
+                // ── Process result ──
                 if (yoloSuccess) {
+                    // Update robot pose to get current heading after sweep
+                    rclcpp::spin_some(node);
+                    x = robotPose.x; y = robotPose.y; phi = robotPose.phi;
+
                     int targetIdx = visitOrder[boxCounter];
                     sceneDetections.push_back({
                         yoloObjectName, confidence,
@@ -421,11 +513,17 @@ int main(int argc, char** argv) {
                     });
 
                     sceneDetectAttempts = 0;
-                    RCLCPP_INFO(node->get_logger(), "Object Identified: %s", yoloObjectName.c_str());
+                    RCLCPP_INFO(node->get_logger(), "[SWEEP] Object Identified: '%s' (%.2f) at heading offset %.1f deg",
+                                yoloObjectName.c_str(), confidence, cumulativeRotation * 180.0 / M_PI);
                     currentState = RobotState::CHECK_MATCH;
                 } else {
+                    // Return to center before giving up
+                    if (std::abs(cumulativeRotation) > 0.01) {
+                        RCLCPP_INFO(node->get_logger(), "[SWEEP] No detection — returning to center");
+                        rotateInPlace(-cumulativeRotation);
+                    }
                     sceneDetectAttempts = 0;
-                    RCLCPP_WARN(node->get_logger(), "Scene detection failed after 10s; skipping box.");
+                    RCLCPP_WARN(node->get_logger(), "[SWEEP] Detection failed after full sweep; skipping box.");
                     boxCounter++;
                     currentState = RobotState::NAVIGATE_SCENE;
                 }
@@ -455,27 +553,26 @@ int main(int argc, char** argv) {
                         break;
                     }
 
-                    double offset = 0.2; // m
+                    // Navigate to 0.2m in front of the box
+                    double offset = 0.2;
                     int targetIdx = visitOrder[boxCounter];
                     double goal_phi = boxes.coords[targetIdx][2];
                     double goal_x = boxes.coords[targetIdx][0] + offset * cos(goal_phi);
                     double goal_y = boxes.coords[targetIdx][1] + offset * sin(goal_phi);
 
-                    // Spin robot 180 degrees to face back toward the box and normalize
+                    // Face back toward the box
                     goal_phi += M_PI;
                     goal_phi = atan2(sin(goal_phi), cos(goal_phi));
 
-                    RCLCPP_INFO(node->get_logger(), "[PLACE_IN_BIN] Moving closer to box %d (visit %d/%zu)", targetIdx, boxCounter + 1, visitOrder.size());
-
+                    RCLCPP_INFO(node->get_logger(), "[PLACE_IN_BIN] Moving to 0.2m from box %d", targetIdx);
                     bool navSuccess = nav.moveToGoal(goal_x, goal_y, goal_phi);
 
-                    if (navSuccess) {
-                        RCLCPP_INFO(node->get_logger(), "[PLACE_IN_BIN] Box %d reached.", targetIdx);
-                    } else {
-                        RCLCPP_WARN(node->get_logger(), "[PLACE_IN_BIN] Failed to reach box %d. Skipping.", targetIdx);
+                    if (!navSuccess) {
+                        RCLCPP_WARN(node->get_logger(), "[PLACE_IN_BIN] Nav failed to reach box %d.", targetIdx);
                         placeAttempts++;
                         break;
                     }
+                    RCLCPP_INFO(node->get_logger(), "[PLACE_IN_BIN] Box %d reached at 0.2m.", targetIdx);
 
                     // RCLCPP_INFO(node->get_logger(),
                     //     "PLACE: Looking for AprilTag ID...");
@@ -560,8 +657,8 @@ int main(int argc, char** argv) {
 
                     // Hard-coded move forward gripper to prepare drop off
                     if (!arm.moveToCartesianPose(
-                        0.024, -0.192, 0.301,
-                        -0.432, -0.467, -0.555,0.535))
+                        0.024, -0.317, 0.272,
+                        -0.425, -0.453, -0.566, 0.542))
                     {
                         RCLCPP_ERROR(node->get_logger(), "PLACE: Step 3 pre-place hover failed");
                         placeAttempts++;
