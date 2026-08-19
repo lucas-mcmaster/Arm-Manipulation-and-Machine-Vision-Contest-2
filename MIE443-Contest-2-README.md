@@ -71,9 +71,10 @@ Dijkstra Heuristic    KDL / OMPL Plan       Class Filter          tf2 Transform
 ##  Algorithmic Highlights
 
 ### 1. Navigable Path-Length Traveling Salesperson Problem (TSP)
-Instead of relying on naive Euclidean distance heuristics (which fail in mazes with walls), `buildVisitOrder()` queries Nav2’s `compute_path_to_pose` action server. It computes actual costmap arc lengths:
+Instead of relying on naive Euclidean distance heuristics (which fail in mazes with walls), `buildVisitOrder()` queries Nav2’s `compute_path_to_pose` action server. It computes actual costmap arc lengths by:
 $$L = \sum_{i=1}^n \sqrt{(x_i - x_{i-1})^2 + (y_i - y_{i-1})^2}$$
-A greedy nearest-neighbour sequence is computed in $<10\text{ seconds}$ across all 5 waypoints, optimizing travel time within the 300s limit.
+
+Then, a greedy nearest-neighbour sequence is computed in $<10\text{ seconds}$ across all 5 waypoints, optimizing travel time within the 300s limit.
 
 ### 2. Two-Stage YOLOv8 Perception Pipeline
 - Raw detections are filtered through a strict 5-class allowlist: `[cup, bottle, clock, motorcycle, potted plant]`.
