@@ -6,15 +6,15 @@
 ![Nav2](https://img.shields.io/badge/Navigation-Nav2%20(MPPI)-blue)
 ![MoveIt2](https://img.shields.io/badge/Manipulation-MoveIt%202-red)
 ![YOLOv8](https://img.shields.io/badge/Perception-YOLOv8-00FFFF)
-![License](https://img.shields.io/badge/License-MIT-lightgrey)
+
 
 > **MIE443 Mechatronics Systems: Design & Integration | University of Toronto**  
-> *Team Members: Nicolas Rebollo Canedo-Arguelles, Ahmed Fahmi, Lucas McMaster, Bido Mohamed*  
+> *Team Members: Nicolas Rebollo Canedo-Arguelles, Lucas McMaster, Ahmed Fahmi, Bido Mohamed*  
 > *Contest 2: "I Can Help You Clean — Pick and Place of Household Objects"*
 
 ---
 
-## 📌 Overview
+##  Overview
 
 This project implements a fully autonomous mobile manipulation pipeline deployed on a **Clearpath TurtleBot 4 Lite** equipped with an **SO-ARM101 6-DOF robotic arm**. Operating within an unknown $4.87 \times 4.87\text{ m}^2$ maze under a strict 300-second (5-minute) deadline, the robot must:
 
@@ -26,7 +26,7 @@ This project implements a fully autonomous mobile manipulation pipeline deployed
 
 ---
 
-## 🤖 Hardware & Sensor Suite
+##  Hardware & Sensor Suite
 
 - **Mobile Base**: iRobot Create 3 / Clearpath TurtleBot 4 Lite.
 - **Sensors**:  
@@ -38,7 +38,7 @@ This project implements a fully autonomous mobile manipulation pipeline deployed
 
 ---
 
-## 🧩 Software Architecture & Control Flow
+##  Software Architecture & Control Flow
 
 ```text
 +-----------------------------------------------------------------------------------+
@@ -68,7 +68,7 @@ Dijkstra Heuristic    KDL / OMPL Plan       Class Filter          tf2 Transform
 
 ---
 
-## 💡 Algorithmic Highlights
+##  Algorithmic Highlights
 
 ### 1. Navigable Path-Length Traveling Salesperson Problem (TSP)
 Instead of relying on naive Euclidean distance heuristics (which fail in mazes with walls), `buildVisitOrder()` queries Nav2’s `compute_path_to_pose` action server. It computes actual costmap arc lengths:
@@ -87,7 +87,7 @@ Applies safety clearance offsets to guarantee collision-free gripper positioning
 
 ---
 
-## 📂 Repository File Structure
+##  Repository File Structure
 
 ```text
 MIE443-Contest-2/
@@ -116,7 +116,7 @@ MIE443-Contest-2/
 
 ---
 
-## 🚀 Build & Execution Guide
+##  Build & Execution Guide
 
 ### Prerequisites
 - ROS 2 (Humble or Iron)
