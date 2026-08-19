@@ -9,7 +9,7 @@
 
 
 > **MIE443 Mechatronics Systems: Design & Integration | University of Toronto**  
-> *Team Members: Nicolas Rebollo Canedo-Arguelles, Lucas McMaster, Ahmed Fahmi, Bido Mohamed*  
+> *Team Members: Lucas McMaster, Nicolas Rebollo Canedo-Arguelles, Ahmed Fahmi, Bido Mohamed*  
 > *Contest 2: "I Can Help You Clean — Pick and Place of Household Objects"*
 
 ---
