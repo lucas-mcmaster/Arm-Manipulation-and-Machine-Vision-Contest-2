@@ -83,7 +83,7 @@ Then, a greedy nearest-neighbour sequence is computed in $<10\text{ seconds}$ ac
 
 ### 3. Coordinate Frame Spatial Transformation for Bin Placement
 Transforms localized AprilTag poses from the camera frame to the arm manipulator base:
-$$T_{\text{arm\_mount}}^{\text{tag}} = \left( T_{\text{oakd}}^{\text{arm\_mount}} \right)^{-1} \cdot T_{\text{oakd}}^{\text{tag}}$$
+$$T_{\text{armMount}}^{\text{tag}} = \left( T_{\text{oakd}}^{\text{armMount}} \right)^{-1} \cdot T_{\text{oakd}}^{\text{tag}}$$
 Applies safety clearance offsets to guarantee collision-free gripper positioning over the bin drop zone.
 
 ---
