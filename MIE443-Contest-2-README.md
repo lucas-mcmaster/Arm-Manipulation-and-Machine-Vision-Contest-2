@@ -82,10 +82,10 @@ Then, a greedy nearest-neighbour sequence is computed in $<10\text{ seconds}$ ac
 - Enforces confidence thresholding ($\ge 0.20$) and multi-frame retry loops with in-place rotation sweeping.
 
 ### 3. Coordinate Frame Spatial Transformation for Bin Placement
-Transforms localized AprilTag poses from the camera frame to the arm manipulator base:
+Transforms localized AprilTag poses from the camera frame to the arm manipulator base by:
 $$T_{\text{armMount}}^{\text{tag}} = \left( T_{\text{oakd}}^{\text{armMount}} \right)^{-1} \cdot T_{\text{oakd}}^{\text{tag}}$$
 
-Applies safety clearance offsets to guarantee collision-free gripper positioning over the bin drop zone.
+Then, applies safety clearance offsets to guarantee collision-free gripper positioning over the bin drop zone.
 
 ---
 
